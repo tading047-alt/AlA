@@ -2,10 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# نسخ الملفات بشكل منفصل
-COPY main.py .
+COPY main .
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "main.py"]
+CMD ["python", "main"]
