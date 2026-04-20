@@ -322,8 +322,8 @@ class HybridLogger:
         
         self.daily_stats = {}
         self.telegram_enabled = True
-        self.telegram_token = os.environ.get("TELEGRAM_TOKEN", "")
-        self.telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.telegram_token = os.environ.get("8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68", "")
+        self.telegram_chat_id = os.environ.get("5067771509", "")
         self.min_notification_level = NotificationLevel.INFO
         
         print(f"✅ نظام التسجيل جاهز - المجلد: {base_dir}")
