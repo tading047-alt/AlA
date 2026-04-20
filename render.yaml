@@ -1,0 +1,60 @@
+# =========================================================
+# Render Deployment Configuration
+# نظام التداول الهجين
+# =========================================================
+
+services:
+  # الخدمة الرئيسية - تعمل 24/7
+  - type: worker
+    name: hybrid-trading-bot
+    runtime: python
+    region: frankfurt  # اختر Frankfurt (أقرب لأوروبا) أو Singapore (لآسيا)
+    
+    # إعدادات Python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    
+    # خطة التسعير (اختر المناسب)
+    plan: starter  # starter = 7$/month, يمكنك البدء بـ free للتجربة
+    
+    # متغيرات البيئة - ضع قيمك هنا
+    envVars:
+      # أساسيات تيليجرام
+      - key: TELEGRAM_TOKEN
+        sync: false  # لا تتم مزامنته - ستدخله يدوياً
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      
+      # إعدادات التداول
+      - key: INITIAL_CAPITAL
+        value: "1000"
+      - key: MAX_CONCURRENT_TRADES
+        value: "3"
+      - key: SCAN_INTERVAL
+        value: "45"
+      
+      # إعدادات البوت
+      - key: MIN_STATION_CONFIDENCE
+        value: "65"
+      - key: MIN_CONSENSUS_SCORE
+        value: "55"
+      - key: TZ
+        value: "UTC"
+      
+      # مفاتيح البورصة (ستدخلها يدوياً في لوحة تحكم Render)
+      - key: GATEIO_API_KEY
+        sync: false
+      - key: GATEIO_SECRET
+        sync: false
+    
+    # القرص الدائم (لحفظ السجلات)
+    disk:
+      name: trading-logs
+      mountPath: /opt/render/project/src/trading_logs
+      sizeGB: 1  # 1GB كافي لسجلات أشهر
+    
+    # فحص الصحة - بسيط
+    healthCheckPath: /health
+    
+    # إعادة التشغيل التلقائي
+    autoDeploy: true
