@@ -8,7 +8,7 @@ import asyncio
 import httpx
 from datetime import datetime
 
-TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
+TOKEN = "8738851163:AAEe7YI7p05xSxsRSruu34taIaUk47aHCQY"
 CHAT_ID = "5067771509"
 
 async def send_test():
