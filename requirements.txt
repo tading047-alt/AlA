@@ -1,6 +1,6 @@
-ccxt
-pandas
-numpy
-flask
-gunicorn
-httpx
+# مكتبات أساسية فقط - خفيفة وسريعة التثبيت
+ccxt==4.2.85
+pandas==2.1.4
+numpy==1.24.3
+aiofiles==23.2.1
+httpx==0.25.2
