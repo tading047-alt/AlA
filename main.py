@@ -1,5 +1,5 @@
 """
-نظام التداول الورقي المتكامل - الإصدار النهائي مع الثقة التراكمية وتأكيد الاختراق
+نظام التداول الورقي المتكامل - الإصدار النهائي مع تجنب Rate Limit
 ============================================================================
 التحسينات المدمجة:
 - مؤشر TSI للزخم غير المتأخر
@@ -15,9 +15,10 @@
 - فلترة مسبقة معززة (تغير السعر والحجم في 5 دقائق)
 - نظام أولويات لتحليل العملات الساخنة أولاً
 - تصنيف ذكي Gold/Silver/Bronze
-- ⭐ فلتر تأكيد الاختراق (يمنع الاختراقات الكاذبة)
-- ⭐ نظام الثقة التراكمي (Confidence Scoring)
-- ⭐ حجم صفقة متكيف مع درجة الثقة
+- فلتر تأكيد الاختراق (يمنع الاختراقات الكاذبة)
+- نظام الثقة التراكمي (Confidence Scoring)
+- حجم صفقة متكيف مع درجة الثقة
+- ⭐ تحسينات Rate Limit: تأخير بين الطلبات، تقليل عدد العملات، زيادة فترات المسح
 """
 
 import asyncio
@@ -37,7 +38,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # =========================================================
 # إعدادات تيليجرام
 # =========================================================
-TELEGRAM_TOKEN = "8274146078:AAF7wWSBm0UifEIQMgNlrL2npdc-KXBiXxY"
+TELEGRAM_TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
 PUBLIC_CHAT_ID = "-1003692815602"
 PRIVATE_USER_ID = "5067771509"
 
@@ -51,26 +52,26 @@ MAX_POSITIONS = 10
 MIN_APPEARANCES = 3
 TOP_CANDIDATES_COUNT = 5
 
-# إعدادات المسح
-GOLD_SCAN_INTERVAL = 180
-SILVER_SCAN_INTERVAL = 600
-BRONZE_SCAN_INTERVAL = 1800
+# ⭐ إعدادات المسح (مخففة لتجنب Rate Limit)
+GOLD_SCAN_INTERVAL = 300    # 5 دقائق (كان 180)
+SILVER_SCAN_INTERVAL = 900  # 15 دقيقة (كان 600)
+BRONZE_SCAN_INTERVAL = 1800 # 30 دقيقة
 
-GOLD_COUNT = 80
-SILVER_COUNT = 200
-BRONZE_COUNT = 500
+GOLD_COUNT = 50     # كان 80
+SILVER_COUNT = 120  # كان 200
+BRONZE_COUNT = 250  # كان 500
 
-PRICE_UPDATE_INTERVAL = 30
+PRICE_UPDATE_INTERVAL = 60  # تحديث الأسعار كل دقيقة (كان 30)
 
 # عتبات تقييم النتائج
 FAIL_THRESHOLD = -0.03
 SUCCESS_THRESHOLD = 0.06
 MAX_AGE_HOURS = 24
 
-# ⭐ إعدادات الثقة
-MIN_CONFIDENCE_TO_TRADE = 30  # الحد الأدنى للثقة لفتح صفقة
-CONFIDENCE_HIGH = 70  # عتبة الثقة العالية
-CONFIDENCE_MEDIUM = 50  # عتبة الثقة المتوسطة
+# إعدادات الثقة
+MIN_CONFIDENCE_TO_TRADE = 30
+CONFIDENCE_HIGH = 70
+CONFIDENCE_MEDIUM = 50
 
 # متغيرات الإيقاف
 is_paused = False
@@ -84,21 +85,28 @@ silver_symbols = []
 bronze_symbols = []
 symbol_classification_time = 0
 
-# ⭐ التخزين المؤقت للتحليل
+# التخزين المؤقت للتحليل
 analysis_cache = {}
 
-# مراقبة API
+# ⭐ نظام مراقبة Rate Limit
 api_requests_count = 0
 api_requests_reset_time = time.time()
+MAX_REQUESTS_PER_MINUTE = 120  # هامش أمان (الحد الرسمي 200)
 
 def can_make_request():
     global api_requests_count, api_requests_reset_time
     if time.time() - api_requests_reset_time >= 60:
         api_requests_count = 0
         api_requests_reset_time = time.time()
-    if api_requests_count >= 180:
+    if api_requests_count >= MAX_REQUESTS_PER_MINUTE:
         return False
     api_requests_count += 1
+    return True
+
+async def wait_for_rate_limit():
+    """انتظار حتى يسمح Rate Limit بعمل طلب جديد"""
+    while not can_make_request():
+        await asyncio.sleep(0.5)
     return True
 
 # =========================================================
@@ -155,11 +163,12 @@ def backup_files():
     print(f"✅ نسخ احتياطي في {backup_dir}")
 
 # =========================================================
-# آلية إعادة المحاولة
+# آلية إعادة المحاولة (مع تأخير أطول)
 # =========================================================
-async def fetch_with_retry(func, *args, max_retries=3, delay=2, **kwargs):
+async def fetch_with_retry(func, *args, max_retries=3, delay=5, **kwargs):
     for attempt in range(max_retries):
         try:
+            await wait_for_rate_limit()
             return await func(*args, **kwargs)
         except Exception as e:
             if attempt == max_retries - 1:
@@ -245,10 +254,9 @@ def get_ema_slope(close, length=20, periods=3):
     return slope
 
 # =========================================================
-# ⭐ فلتر تأكيد الاختراق
+# فلتر تأكيد الاختراق
 # =========================================================
 def check_breakout_confirmation(df):
-    """يتأكد من أن الاختراق حقيقي وليس كاذباً"""
     if len(df) < 3:
         return False, 0
     
@@ -256,31 +264,25 @@ def check_breakout_confirmation(df):
     breakout_candle = df.iloc[-2]
     confirmation_candle = df.iloc[-1]
     
-    # شمعة الاختراق أغلقت فوق المقاومة
     if breakout_candle['close'] <= resistance:
         return False, 0
     
-    # شمعة التأكيد لم تهبط تحت المقاومة
     if confirmation_candle['low'] < resistance * 0.99:
         return False, 0
     
-    # حجم التأكيد جيد
     avg_vol = df['volume'].rolling(20).mean().iloc[-1]
     if confirmation_candle['volume'] < avg_vol * 0.7:
         return False, 0
     
-    # قوة التأكيد (نسبة مئوية)
     confirmation_strength = (confirmation_candle['close'] - resistance) / resistance * 100
     return True, confirmation_strength
 
 # =========================================================
-# ⭐ نظام الثقة التراكمي
+# نظام الثقة التراكمي
 # =========================================================
 def calculate_confidence_score(candidate, market_context, breakout_confirmed=False, breakout_strength=0):
-    """حساب درجة ثقة من 0-100 للإشارة"""
     confidence = 0
     
-    # 1. جودة السكور (30 نقطة)
     filter_score = candidate.get('filter_score', 0)
     if filter_score >= 70:
         confidence += 30
@@ -291,7 +293,6 @@ def calculate_confidence_score(candidate, market_context, breakout_confirmed=Fal
     elif filter_score >= 20:
         confidence += 8
     
-    # 2. قوة الاختراق والتأكيد (25 نقطة)
     if breakout_confirmed:
         confidence += 20
         if breakout_strength > 2:
@@ -301,7 +302,6 @@ def calculate_confidence_score(candidate, market_context, breakout_confirmed=Fal
     elif candidate.get('volume_confirm', False):
         confidence += 10
     
-    # 3. تأكيد الزخم - نقاط الاستراتيجية (20 نقطة)
     strategy_points = candidate.get('strategy_points', 0)
     if strategy_points >= 6:
         confidence += 20
@@ -310,20 +310,17 @@ def calculate_confidence_score(candidate, market_context, breakout_confirmed=Fal
     elif strategy_points >= 2:
         confidence += 8
     
-    # 4. حالة السوق (15 نقطة)
     regime = market_context.get('regime', 'CALM')
     if regime == 'HOT':
         confidence += 15
     elif regime == 'CALM':
         confidence += 10
     else:
-        confidence += 3  # COLD - ثقة منخفضة
+        confidence += 3
     
-    # 5. الأولوية والزخم اللحظي (10 نقاط)
     priority = candidate.get('priority', 0)
     confidence += min(priority * 2, 10)
     
-    # 6. مكافأة ألفا العالي (حتى 10 نقاط إضافية)
     alpha = candidate.get('alpha', 0)
     if alpha >= 2.0:
         confidence += 10
@@ -335,15 +332,14 @@ def calculate_confidence_score(candidate, market_context, breakout_confirmed=Fal
     return min(confidence, 100)
 
 def get_confidence_level(confidence):
-    """تحديد مستوى الثقة"""
     if confidence >= CONFIDENCE_HIGH:
-        return "HIGH", 1.3  # مضاعف 1.3 للحجم
+        return "HIGH", 1.3
     elif confidence >= CONFIDENCE_MEDIUM:
-        return "MEDIUM", 1.0  # مضاعف 1.0
+        return "MEDIUM", 1.0
     elif confidence >= MIN_CONFIDENCE_TO_TRADE:
-        return "LOW", 0.7  # مضاعف 0.7
+        return "LOW", 0.7
     else:
-        return "REJECT", 0  # مرفوض
+        return "REJECT", 0
 
 # =========================================================
 # فلاتر التأكيد
@@ -479,7 +475,6 @@ def calculate_dynamic_position_size(signal_type, cash, entry_price, stop_loss, t
     position_value = min(position_value, cash * 0.95)
     position_value = min(position_value, settings['max_value'])
     
-    # ⭐ تطبيق مضاعف الثقة
     position_value = position_value * confidence_multiplier
     
     return position_value
@@ -543,7 +538,7 @@ def calculate_priority(item):
     return priority
 
 # =========================================================
-# ⭐ التخزين المؤقت للتحليل
+# التخزين المؤقت للتحليل
 # =========================================================
 def get_cached_analysis(symbol, current_price):
     if symbol in analysis_cache:
@@ -601,14 +596,15 @@ async def classify_symbols(exchange, symbols):
     return gold, silver, bronze
 
 # =========================================================
-# فلترة مسبقة معززة مع أولويات
+# فلترة مسبقة معززة (مع تأخير لتجنب Rate Limit)
 # =========================================================
 async def enhanced_quick_filter(exchange, symbols, tier_name):
-    if not can_make_request():
-        await asyncio.sleep(1)
+    await wait_for_rate_limit()
     
     async def fetch_symbol_data(symbol):
         try:
+            await asyncio.sleep(0.15)  # ⭐ تأخير بين الطلبات
+            
             ticker = await fetch_with_retry(exchange.fetch_ticker, symbol)
             ohlcv = await fetch_with_retry(exchange.fetch_ohlcv, symbol, '5m', limit=2)
             
@@ -1309,15 +1305,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # =========================================================
-# دالة تحليل مجموعة عملات (مع أولويات وثقة)
+# دالة تحليل مجموعة عملات
 # =========================================================
-async def analyze_symbols_with_priority(exchange_sync, filtered_items, market_ctx, tier_name, max_to_analyze=30):
+async def analyze_symbols_with_priority(exchange_sync, filtered_items, market_ctx, tier_name, max_to_analyze=25):
     candidates = []
     
     items_to_analyze = filtered_items[:max_to_analyze]
     
     for item in items_to_analyze:
-        # ⭐ محاولة استخدام التحليل المخزن
         cached = get_cached_analysis(item['symbol'], item['close'])
         if cached:
             candidates.append(cached)
@@ -1349,7 +1344,6 @@ async def analyze_symbols_with_priority(exchange_sync, filtered_items, market_ct
         if not trend_confirm:
             continue
 
-        # ⭐ فلتر تأكيد الاختراق
         breakout_confirmed, breakout_strength = check_breakout_confirmation(df)
 
         alpha = calculate_enhanced_alpha(df, market_ctx, obi)
@@ -1378,10 +1372,8 @@ async def analyze_symbols_with_priority(exchange_sync, filtered_items, market_ct
             'priority': item.get('priority', 0)
         }
         
-        # ⭐ حساب درجة الثقة
         cand['confidence'] = calculate_confidence_score(cand, market_ctx, breakout_confirmed, breakout_strength)
         
-        # ⭐ تخزين التحليل
         cache_analysis(item['symbol'], last_price, cand)
         
         candidates.append(cand)
@@ -1396,18 +1388,14 @@ async def process_candidates(candidates, trader, exchange_sync, tracker, tier_na
     positions_opened = 0
     MAX_POSITIONS_PER_SCAN = 3 if tier_name == "Gold" else 2
     
-    # ترتيب المرشحين حسب الثقة ثم final_rank
     candidates.sort(key=lambda x: (x['confidence'], x['final_rank']), reverse=True)
     
-    # أولوية 1: انفجار وشيك
     for cand in candidates:
         if positions_opened >= MAX_POSITIONS_PER_SCAN:
             break
         
-        # ⭐ فحص الثقة أولاً
         confidence_level, confidence_multiplier = get_confidence_level(cand['confidence'])
         if confidence_level == "REJECT":
-            print(f"⚠️ {cand['symbol']} مرفوضة بسبب انخفاض الثقة ({cand['confidence']}%)")
             continue
         
         is_explosive, criteria_met, _ = check_explosion_criteria(cand)
@@ -1431,7 +1419,6 @@ async def process_candidates(candidates, trader, exchange_sync, tracker, tier_na
                                        confidence_multiplier=confidence_multiplier):
                     positions_opened += 1
 
-    # تحضير للتأكيد متعدد الدورات
     for cand in candidates:
         df = cand['df']
         if df is not None and len(df) > 14:
@@ -1465,7 +1452,6 @@ async def process_candidates(candidates, trader, exchange_sync, tracker, tier_na
                                    confidence_multiplier=confidence_multiplier):
                 positions_opened += 1
 
-    # أولوية 3: عملة جيدة
     for cand in candidates:
         if positions_opened >= MAX_POSITIONS_PER_SCAN:
             break
@@ -1483,7 +1469,6 @@ async def process_candidates(candidates, trader, exchange_sync, tracker, tier_na
                                        confidence_multiplier=confidence_multiplier):
                     positions_opened += 1
 
-    # إرسال قائمة الترشيحات
     if candidates:
         msg = f"📋 أفضل {len(candidates)} ترشيحات ({tier_name}):\n\n"
         for i, c in enumerate(candidates, 1):
@@ -1503,7 +1488,6 @@ async def trading_loop():
     exchange_sync = ccxt.gateio({'enableRateLimit': True})
     exchange_sync_instance = exchange_sync
 
-    # تحميل وتصنيف العملات
     markets = await fetch_with_retry(exchange_async.load_markets)
     if markets:
         all_syms = [s for s in markets if s.endswith('/USDT') and '.d' not in s]
@@ -1533,21 +1517,19 @@ async def trading_loop():
     last_silver_scan = 0
     last_bronze_scan = 0
 
-    print(f"🤖 بدء التداول بنظام الثقة التراكمية - {datetime.now()}\n")
+    print(f"🤖 بدء التداول بنظام Rate Limit الآمن - {datetime.now()}\n")
     await asyncio.sleep(2)
-    await send_telegram_message(f"🚀 بوت التداول الذكي مع نظام الثقة بدأ العمل!\n🥇 Gold: {len(gold_symbols)} عملة (كل 3 دقائق)\n🥈 Silver: {len(silver_symbols)} عملة (كل 10 دقائق)\n🥉 Bronze: {len(bronze_symbols)} عملة (كل 30 دقيقة)\n🤖 حد الثقة: {MIN_CONFIDENCE_TO_TRADE}%")
+    await send_telegram_message(f"🚀 بوت التداول الآمن بدأ العمل!\n🥇 Gold: {len(gold_symbols)} عملة (كل 5 دقائق)\n🥈 Silver: {len(silver_symbols)} عملة (كل 15 دقيقة)\n🥉 Bronze: {len(bronze_symbols)} عملة (كل 30 دقيقة)\n🛡️ Rate Limit: {MAX_REQUESTS_PER_MINUTE} طلب/دقيقة")
 
     while True:
         try:
             current_time = time.time()
             
-            # إعادة تصنيف العملات كل 6 ساعات
             if current_time - symbol_classification_time >= 21600:
                 print("🔄 إعادة تصنيف العملات...")
                 gold_symbols, silver_symbols, bronze_symbols = await classify_symbols(exchange_async, all_syms)
                 symbol_classification_time = current_time
 
-            # تحديث الأسعار كل 30 ثانية
             if current_time - last_price_update >= PRICE_UPDATE_INTERVAL:
                 tracker.update_prices(exchange_sync)
                 tracker.evaluate_and_close()
@@ -1566,7 +1548,6 @@ async def trading_loop():
 
                 last_price_update = current_time
 
-            # فحص الإيقاف المؤقت
             if is_paused:
                 if pause_until_time and datetime.now() >= pause_until_time:
                     is_paused = False
@@ -1585,38 +1566,33 @@ async def trading_loop():
                 await asyncio.sleep(30)
                 continue
 
-            # ⭐ المسح حسب المستوى
-            # Gold: كل 3 دقائق
             if current_time - last_gold_scan >= GOLD_SCAN_INTERVAL and gold_symbols:
                 print(f"\n🥇 مسح Gold: {len(gold_symbols[:GOLD_COUNT])} عملة")
                 filtered = await enhanced_quick_filter(exchange_async, gold_symbols[:GOLD_COUNT], "Gold")
                 if filtered:
-                    candidates = await analyze_symbols_with_priority(exchange_sync, filtered, market_ctx, "Gold", max_to_analyze=25)
+                    candidates = await analyze_symbols_with_priority(exchange_sync, filtered, market_ctx, "Gold", max_to_analyze=20)
                     if candidates:
                         await process_candidates(candidates, trader, exchange_sync, tracker, "Gold")
                 last_gold_scan = current_time
 
-            # Silver: كل 10 دقائق
             if current_time - last_silver_scan >= SILVER_SCAN_INTERVAL and silver_symbols:
                 print(f"\n🥈 مسح Silver: {len(silver_symbols[:SILVER_COUNT])} عملة")
                 filtered = await enhanced_quick_filter(exchange_async, silver_symbols[:SILVER_COUNT], "Silver")
                 if filtered:
-                    candidates = await analyze_symbols_with_priority(exchange_sync, filtered, market_ctx, "Silver", max_to_analyze=20)
+                    candidates = await analyze_symbols_with_priority(exchange_sync, filtered, market_ctx, "Silver", max_to_analyze=15)
                     if candidates:
                         await process_candidates(candidates, trader, exchange_sync, tracker, "Silver")
                 last_silver_scan = current_time
 
-            # Bronze: كل 30 دقيقة
             if current_time - last_bronze_scan >= BRONZE_SCAN_INTERVAL and bronze_symbols:
                 print(f"\n🥉 مسح Bronze: {len(bronze_symbols[:BRONZE_COUNT])} عملة")
                 filtered = await enhanced_quick_filter(exchange_async, bronze_symbols[:BRONZE_COUNT], "Bronze")
                 if filtered:
-                    candidates = await analyze_symbols_with_priority(exchange_sync, filtered, market_ctx, "Bronze", max_to_analyze=15)
+                    candidates = await analyze_symbols_with_priority(exchange_sync, filtered, market_ctx, "Bronze", max_to_analyze=10)
                     if candidates:
                         await process_candidates(candidates, trader, exchange_sync, tracker, "Bronze")
                 last_bronze_scan = current_time
 
-            # تقرير كل ساعة
             if current_time - last_report >= 3600:
                 prices = {}
                 for pos in trader.positions:
@@ -1649,7 +1625,6 @@ async def trading_loop():
                     reject_reasons[key] = 0
                 last_report = current_time
 
-            # نسخ احتياطي كل 24 ساعة
             if current_time - last_backup >= 86400:
                 backup_files()
                 last_backup = current_time
