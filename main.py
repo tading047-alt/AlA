@@ -37,7 +37,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 # =========================================================
 # إعدادات تيليجرام
 # =========================================================
-TELEGRAM_TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
+TELEGRAM_TOKEN = "8274146078:AAF7wWSBm0UifEIQMgNlrL2npdc-KXBiXxY"
 PUBLIC_CHAT_ID = "-1003692815602"
 PRIVATE_USER_ID = "5067771509"
 
