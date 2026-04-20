@@ -2,137 +2,129 @@ import asyncio
 import ccxt.async_support as ccxt_async
 import ccxt
 import pandas as pd
-import numpy as np
+import json
 import os
 import csv
+import threading
+import httpx
+from flask import Flask, send_file
 from datetime import datetime
 
 # =========================================================
-# 1. الإعدادات والرموز التعريفية
+# 1. الإعدادات والروابط
 # =========================================================
 TELEGRAM_TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
 PUBLIC_CHAT_ID = "-1003692815602"
-BOT_TAG = "#trading_100"  # الوسم المميز للاشعارات
+BOT_TAG = "#trading_100"
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 
 LOG_TRADES = "paper_trading_results.csv"
-LOG_EXPLOSIONS = "imminent_explosions.csv"
-
-active_positions = {}
+STATE_FILE = "bot_state.json" # لضمان عدم ضياع الرصيد والصفقات
+FEE_RATE = 0.002 
 
 # =========================================================
-# 2. وظائف التحليل والسكور
+# 2. إدارة الذاكرة الدائمة (Persistence Logic)
 # =========================================================
-def calculate_hierarchy_score(df):
-    c1, c2 = df.iloc[-1], df.iloc[-2]
-    ma20 = df['close'].rolling(20).mean()
-    std = df['close'].rolling(20).std()
-    bw = ((std * 4) / ma20).iloc[-1]
-    rvol = c1['volume'] / (df['volume'].iloc[-21:-1].mean() + 0.000001)
-
-    score = 0
-    if c1['close'] > c2['high']: score += 40
-    if bw < 0.023: score += 30
-    if rvol > 1.3: score += 30
-
-    efficiency = abs(c1['close'] - c1['open']) / (c1['high'] - c1['low'] + 0.000001)
-    velocity = sum(1 for i in range(1, 4) if df['close'].iloc[-i] > df['close'].iloc[-i-1])
-    recent_high = df['high'].iloc[-50:].max()
-    expected_move = round(((recent_high - c1['close']) / c1['close']) * 100, 2)
-
-    return {
-        'main': score, 'eff': efficiency, 'vel': velocity, 
-        'exp': max(expected_move, round(rvol * 2.5, 2))
+def save_state(balance, positions):
+    """حفظ حالة البوت في ملف صلب"""
+    state = {
+        "current_balance": balance,
+        "active_positions": positions
     }
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f)
 
-async def check_exceptional_exit(symbol, trade, current_price, btc_change):
-    profit = ((current_price - trade['entry']) / trade['entry']) * 100
-    minutes_passed = (datetime.now() - trade['start_time']).total_seconds() / 60
-    if profit > trade.get('max_profit', 0): trade['max_profit'] = profit
+def load_state():
+    """استعادة الحالة عند إعادة التشغيل"""
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r') as f:
+            state = json.load(f)
+            return state.get("current_balance", 1000.0), state.get("active_positions", {})
+    return 1000.0, {}
 
-    if minutes_passed > 45 and profit < 0.5: return True, "الزمن الميت (45د)"
-    if trade.get('max_profit', 0) >= 2.0 and profit < (trade['max_profit'] * 0.5): return True, "تراجع الزخم (50%)"
-    if btc_change < -0.8: return True, "انهيار البيتكوين اللحظي"
-    return False, None
+# تحميل البيانات عند بدء تشغيل الكود
+current_balance, active_positions = load_state()
 
 # =========================================================
-# 3. المحرك وإدارة الإشعارات
+# 3. محرك التداول المطور بالتعافي الذاتي
 # =========================================================
-async def main_engine():
+async def trading_engine():
+    global current_balance, active_positions
     ex_async = ccxt_async.gateio({'enableRateLimit': True})
     ex_sync = ccxt.gateio({'enableRateLimit': True})
     
-    print(f"💎 {BOT_TAG} يعمل الآن على سيرفر أمستردام بتوقيت تونس...")
+    await send_tg(f"🛡️ **نظام التعافي الذاتي نشط** {BOT_TAG}\n💰 الرصيد الحالي: {current_balance:.2f}$\n📦 صفقات مستعادة: {len(active_positions)}")
 
     while True:
         try:
-            btc_ticker = await ex_async.fetch_ticker('BTC/USDT')
-            btc_change = btc_ticker['percentage']
+            btc = await ex_async.fetch_ticker('BTC/USDT')
+            btc_p = btc['percentage']
             
             # --- إدارة الخروج ---
             to_remove = []
-            for symbol, trade in active_positions.items():
-                ticker = await ex_async.fetch_ticker(symbol)
-                curr_p = ticker['last']
-                should_exc, r_exc = await check_exceptional_exit(symbol, trade, curr_p, btc_change)
-                profit = ((curr_p - trade['entry']) / trade['entry']) * 100
+            state_changed = False
+            
+            for sym, trade in active_positions.items():
+                t = await ex_async.fetch_ticker(sym)
+                cp = t['last']
+                gross_pft = ((cp - trade['entry']) / trade['entry']) * 100
                 
                 exit_now, reason = False, ""
-                if should_exc: exit_now, reason = True, f"خروج استثنائي: {r_exc}"
-                elif curr_p <= trade['sl']: exit_now, reason = True, "وقف الخسارة (SL)"
-                elif curr_p >= trade['tp']: exit_now, reason = True, "الهدف (TP)"
-
+                if cp >= trade['tp']: exit_now, reason = True, "🎯 Target"
+                elif cp <= trade['sl']: exit_now, reason = True, "🛑 Stop"
+                
                 if exit_now:
-                    msg = (f"📉 **إغلاق صفقة** {BOT_TAG}\n"
-                           f"🪙 العملة: {symbol}\n"
-                           f"📊 النتيجة: {reason}\n"
-                           f"💰 الربح/الخسارة: {profit:.2f}%")
-                    print(msg) # هنا تضع كود إرسال التليجرام
-                    log_to_csv({'time': datetime.now(), 'sym': symbol, 'profit': round(profit, 2), 'reason': reason}, LOG_TRADES)
-                    to_remove.append(symbol)
-
+                    fees = trade['allocated_amount'] * FEE_RATE
+                    net_profit = (trade['allocated_amount'] * (gross_pft / 100)) - fees
+                    current_balance += net_profit
+                    
+                    log_to_csv({
+                        'date': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        'sym': sym, 'net_pft': round((net_profit/trade['allocated_amount'])*100, 2),
+                        'balance': round(current_balance, 2), 'reason': reason
+                    }, LOG_TRADES)
+                    
+                    await send_tg(f"📉 **إغلاق صفقة** {BOT_TAG}\n🪙 {sym}\n💵 الصافي: {net_profit:.2f}$\n💰 الرصيد: {current_balance:.2f}$")
+                    to_remove.append(sym)
+                    state_changed = True
+            
             for s in to_remove: del active_positions[s]
 
             # --- المسح والدخول ---
-            if btc_change > -1.0:
+            if btc_p > -1.2 and len(active_positions) < 3:
                 tickers = await ex_async.fetch_tickers()
-                candidates = [s for s, t in tickers.items() if s.endswith('/USDT') and t['quoteVolume'] > 200000]
+                valid = [s for s, t in tickers.items() if s.endswith('/USDT') and t['quoteVolume'] > 350000]
                 
-                results = []
-                for cand in candidates[:50]:
-                    try:
-                        ohlcv = ex_sync.fetch_ohlcv(cand, '5m', limit=60)
-                        df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
-                        m = calculate_hierarchy_score(df)
-                        if m['main'] >= 90:
-                            results.append({'sym': cand, 'p': df['close'].iloc[-1], 'metrics': m, 'df': df})
-                    except: continue
+                for sym in valid[:10]:
+                    if sym in active_positions: continue
+                    # تطبيق فلاتر RSI والسكور هنا...
+                    p = (await ex_async.fetch_ticker(sym))['last']
+                    allocated = current_balance * 0.15 
+                    
+                    active_positions[sym] = {
+                        'entry': p, 'sl': p * 0.96, 'tp': p * 1.07, 
+                        'allocated_amount': allocated
+                    }
+                    state_changed = True
+                    await send_tg(f"🚀 **دخول جديد** {BOT_TAG}\n🪙 {sym}\n💰 المبلغ: {allocated:.2f}$")
 
-                results.sort(key=lambda x: (x['metrics']['main'], x['metrics']['eff']), reverse=True)
-                
-                for sig in results[:3]:
-                    if sig['sym'] not in active_positions:
-                        # حساب ATR للوقف
-                        tr = pd.concat([sig['df']['high']-sig['df']['low'], abs(sig['df']['high']-sig['df']['close'].shift())], axis=1).max(axis=1)
-                        atr = tr.rolling(14).mean().iloc[-1]
-                        sl, tp = sig['p'] - (atr * 1.6), sig['p'] + (atr * 3)
+            # حفظ الحالة إذا حدث أي تغيير
+            if state_changed:
+                save_state(current_balance, active_positions)
 
-                        msg = (f"🚀 **إشارة دخول جديدة** {BOT_TAG}\n"
-                               f"🪙 العملة: {sig['sym']}\n"
-                               f"📊 السكور: {sig['metrics']['main']}\n"
-                               f"📈 الانفجار المتوقع: +{sig['metrics']['exp']}%\n"
-                               f"🛡️ الوقف: {sl:.6f}")
-                        print(msg)
-                        
-                        active_positions[sig['sym']] = {
-                            'entry': sig['p'], 'sl': sl, 'tp': tp,
-                            'start_time': datetime.now(), 'max_profit': 0
-                        }
-
-            await asyncio.sleep(10 if (datetime.now().hour == 0 and datetime.now().minute >= 45) else 30)
-
+            await asyncio.sleep(45)
         except Exception as e:
-            print(f"⚠️ خطأ: {e}")
-            await asyncio.sleep(10)
+            print(f"Error: {e}")
+            await asyncio.sleep(20)
+
+# =========================================================
+# 4. وظائف الدعم
+# =========================================================
+async def send_tg(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    async with httpx.AsyncClient() as client:
+        try: await client.post(url, json={"chat_id": PUBLIC_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+        except: pass
 
 def log_to_csv(data, filename):
     exists = os.path.isfile(filename)
@@ -141,5 +133,13 @@ def log_to_csv(data, filename):
         if not exists: writer.writeheader()
         writer.writerow(data)
 
+app = Flask(__name__)
+@app.route('/')
+def home(): return f"🟢 {BOT_TAG} Online. Balance: {current_balance:.2f}$", 200
+
+@app.route('/download')
+def download(): return send_file(LOG_TRADES, as_attachment=True) if os.path.exists(LOG_TRADES) else ("Empty", 404)
+
 if __name__ == "__main__":
-    asyncio.run(main_engine())
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080))), daemon=True).start()
+    asyncio.run(trading_engine())
