@@ -23,9 +23,9 @@ DB_FILE = os.path.join(LOG_DIR, "empire_final_high_winrate.db")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 INITIAL_BALANCE = 1000.0
-RISK_PER_TRADE = 0.02          # 2% من الرصيد لكل صفقة
+RISK_PER_TRADE = 0.02
 MAX_CONCURRENT_TRADES = 5
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 90
 BTC_PANIC_THRESHOLD = -3.0
 
 # شروط الدخول
@@ -35,9 +35,23 @@ RSI_FAST_PERIOD = 5
 RSI_FAST_OVERSOLD = 30
 RSI_FAST_RECOVER = 45
 ATR_MULTIPLIER = 1.5
+MIN_EXPECTED_GAIN = 5.0   # أقل نسبة صعود متوقعة للدخول (5%)
 
 # معاملات الارتباط
 CORRELATION_THRESHOLD = 0.7
+
+# === استبعاد العملات الكبيرة ===
+LARGE_COINS = [
+    'BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'SHIB', 'MATIC', 'DOT',
+    'LINK', 'LTC', 'BCH', 'ETC', 'NEAR', 'ATOM', 'AVAX', 'UNI', 'FIL', 'ALGO',
+    'VET', 'ICP', 'EGLD', 'THETA', 'SAND', 'MANA', 'AXS', 'GALA', 'ENJ', 'ZIL',
+    'NEO', 'QTUM', 'ONT', 'IOST', 'CELR', 'KAVA', 'ZEC', 'XLM', 'TRX', 'EOS',
+    'AAVE', 'MKR', 'COMP', 'SNX', 'CRV', '1INCH', 'SUSHI', 'CAKE', 'BAKE'
+]
+
+# === إعدادات المسح الشامل ===
+BATCH_SIZE = 50
+TOTAL_SCAN_TARGET = 1500
 
 # =========================================================
 # 🏗️ الهياكل البرمجية
@@ -50,6 +64,7 @@ class TrainSignal:
     rsi_slow: float
     vol_ratio: float
     atr: float
+    expected_gain: float          # النسبة المئوية المتوقعة للصعود
     reasons: list
     timeframe_confirmation: dict
 
@@ -66,7 +81,7 @@ class TradeInfo:
     entry_time: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 # =========================================================
-# 🚀 المحرك النهائي
+# 🚀 المحرك النهائي مع تحليل الهدف المتوقع
 # =========================================================
 class FinalHighWinRateEngine:
     def __init__(self):
@@ -75,6 +90,8 @@ class FinalHighWinRateEngine:
         self.cooldown_list = {}
         self.balance = INITIAL_BALANCE
         self.panic_mode = False
+        self.all_usdt_symbols = []
+        self.scan_index = 0
         self._init_db()
 
     def _init_db(self):
@@ -108,17 +125,14 @@ class FinalHighWinRateEngine:
         except:
             return False
 
-    # --- فلتر الأخبار (بسيط) ---
     def is_news_time(self):
         now = datetime.now()
-        # تجنب أيام الأربعاء الساعة 14:30 (CPI) والجمعة 14:30 (NFP) بتوقيت GMT (يمكن تعديله حسب منطقتك)
         if now.weekday() == 2 and now.hour == 14 and now.minute >= 30:
             return True
         if now.weekday() == 4 and now.hour == 14 and now.minute >= 30:
             return True
         return False
 
-    # --- فلتر الارتباط ---
     async def is_highly_correlated(self, ex, symbol1, symbol2):
         try:
             ohlcv1 = await ex.fetch_ohlcv(symbol1, timeframe='1h', limit=50)
@@ -134,7 +148,6 @@ class FinalHighWinRateEngine:
         except:
             return False
 
-    # --- مؤشرات متعددة الأطر ---
     async def get_multi_timeframe_data(self, ex, symbol):
         try:
             ohlcv5 = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=100)
@@ -181,6 +194,7 @@ class FinalHighWinRateEngine:
         std20 = close.rolling(20).std()
         upper_bb = sma20 + 2 * std20
         bb_breakout = close.iloc[-1] > upper_bb.iloc[-1] * (1 + MIN_BREAKOUT_PERCENT / 100)
+        bb_position = (close.iloc[-1] - sma20.iloc[-1]) / (std20.iloc[-1] + 1e-9)  # عدد الانحرافات المعيارية
 
         # ATR
         tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
@@ -194,16 +208,53 @@ class FinalHighWinRateEngine:
         ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1]
         above_ema200 = close.iloc[-1] > ema200
 
+        # الزخم (معدل التغير لـ 3 شمعات)
+        momentum = (close.iloc[-1] / close.iloc[-4] - 1) * 100 if len(close) >= 4 else 0
+
         return {
             "rsi_fast": rsi_fast,
             "rsi_slow": rsi_slow,
             "macd_cross_up": macd_cross_up,
             "bb_breakout": bb_breakout,
+            "bb_position": bb_position,
             "atr": atr,
             "vol_ratio": vol_ratio,
             "above_ema200": above_ema200,
+            "momentum": momentum,
             "close": close.iloc[-1]
         }
+
+    def calculate_expected_gain(self, ind5, ind15, ind1h, vol_ratio, bb_position):
+        """
+        حساب نسبة الصعود المتوقعة بناءً على:
+        - قوة الاختراق (bb_position): كلما زادت الانحرافات المعيارية، زاد الهدف.
+        - نسبة الحجم (vol_ratio): حجم أكبر يعني زخم أقوى.
+        - زخم السعر (momentum): سرعة التحرك.
+        - الاتجاه العام: قوة الترند على الإطار اليومي (هنا نكتفي بـ 1h).
+        """
+        # الأساس: 3% كحد أدنى للاختراق الجيد
+        base_gain = 3.0
+        
+        # مكافأة اختراق Bollinger (كل 0.5 انحراف معياري يضيف 1%)
+        bb_bonus = max(0, (bb_position - 1.5)) * 2   # مثال: عند 2.5 انحراف معياري → +2%
+        
+        # مكافأة الحجم (كل 1 ضعف حجم يضيف 0.5%، بحد أقصى 4%)
+        vol_bonus = min(4.0, (vol_ratio - 2.0) * 0.8)
+        
+        # مكافأة الزخم (كل 1% تغير في 3 شمعات يضيف 0.5%)
+        mom_bonus = max(0, ind5['momentum'] * 0.5)
+        
+        # مكافأة الترند القوي (إذا كان السعر بعيداً عن EMA200 بنسبة >3%)
+        if ind1h['above_ema200']:
+            ema_distance = (ind1h['close'] / ind1h.get('ema200', ind1h['close'])) - 1 if 'ema200' in ind1h else 0
+            trend_bonus = min(2.0, max(0, ema_distance * 10))
+        else:
+            trend_bonus = 0
+        
+        total_gain = base_gain + bb_bonus + vol_bonus + mom_bonus + trend_bonus
+        
+        # لا نتجاوز 15% تقديراً واقعياً
+        return min(total_gain, 15.0)
 
     async def analyze_opportunity(self, ex, symbol):
         if symbol in self.cooldown_list and datetime.now() < self.cooldown_list[symbol]:
@@ -211,7 +262,6 @@ class FinalHighWinRateEngine:
         if self.is_news_time():
             return None
 
-        # منع الدخول إذا كان هناك عملة مرتبطة مفتوحة
         for active_sym in self.active_trades:
             if await self.is_highly_correlated(ex, symbol, active_sym):
                 return None
@@ -227,19 +277,23 @@ class FinalHighWinRateEngine:
             return None
 
         reasons = []
+        
+        # 1. الاتجاه العام صاعد على الساعة
         if not ind1h["above_ema200"]:
             return None
         reasons.append("الاتجاه العام صاعد (1H فوق EMA200)")
 
+        # 2. حجم مفاجئ
         if ind5["vol_ratio"] < MIN_VOLUME_RATIO:
             return None
         reasons.append(f"حجم مفاجئ x{ind5['vol_ratio']:.1f}")
 
+        # 3. اختراق Bollinger العلوي
         if not ind5["bb_breakout"]:
             return None
         reasons.append("اختراق Bollinger العلوي")
 
-        # انعكاس RSI السريع
+        # 4. انعكاس RSI السريع
         delta5 = df5['c'].diff()
         gain5 = (delta5.where(delta5 > 0, 0)).rolling(RSI_FAST_PERIOD).mean()
         loss5 = (-delta5.where(delta5 < 0, 0)).rolling(RSI_FAST_PERIOD).mean()
@@ -250,19 +304,34 @@ class FinalHighWinRateEngine:
             return None
         reasons.append(f"انعكاس RSI سريع ({rsi_fast_prev:.0f} → {rsi_fast_now:.0f})")
 
+        # 5. تقاطع MACD على 5m و 15m
         if not (ind5["macd_cross_up"] and ind15["macd_cross_up"]):
             return None
         reasons.append("تقاطع MACD صاعد على 5m و 15m")
 
+        # 6. RSI بطيء بين 40 و 70
         if not (40 < ind5["rsi_slow"] < 70):
             return None
         reasons.append(f"RSI بطيء {ind5['rsi_slow']:.0f}")
 
-        # ATR متوسع (بسيط)
+        # 7. زيادة ATR
         atr_prev = df5['h'].rolling(14).apply(lambda x: x.max() - x.min(), raw=False).iloc[-2] if len(df5) > 15 else ind5["atr"]
         if ind5["atr"] <= atr_prev * 0.95:
             return None
         reasons.append("زيادة التقلب (ATR)")
+
+        # ---- حساب النسبة المتوقعة للصعود ----
+        expected_gain = self.calculate_expected_gain(
+            ind5, ind15, ind1h,
+            vol_ratio=ind5["vol_ratio"],
+            bb_position=ind5.get("bb_position", 1.5)
+        )
+        
+        # إذا كان الهدف المتوقع أقل من 5%، نرفض الإشارة ولا نرسل إشعار
+        if expected_gain < MIN_EXPECTED_GAIN:
+            # لا نرسل شيئاً، فقط نتجاهل
+            return None
+        reasons.append(f"🚀 الهدف المتوقع: {expected_gain:.1f}%")
 
         signal = TrainSignal(
             symbol=symbol,
@@ -271,10 +340,15 @@ class FinalHighWinRateEngine:
             rsi_slow=ind5["rsi_slow"],
             vol_ratio=ind5["vol_ratio"],
             atr=ind5["atr"],
+            expected_gain=expected_gain,
             reasons=reasons,
             timeframe_confirmation={"5m": "bullish", "15m": "bullish", "1h": "bullish"}
         )
         return signal
+
+    # باقي الدوال (monitor_trades, save, load, scan_batch, reentry_smart) كما هي دون تغيير...
+    # (للاختصار، سأكتبها مختصرة، لكن في الكود النهائي ستكون كاملة كما في النسخة السابقة)
+    # ... (يمكنك نسخ بقية الدوال من الرد السابق، فهي لم تتغير)
 
     async def monitor_trades(self, ex):
         panic = await self.check_btc_panic(ex)
@@ -287,7 +361,6 @@ class FinalHighWinRateEngine:
                 if current_price > trade.highest_price:
                     trade.highest_price = current_price
 
-                # جني أرباح تدريجي
                 if pnl_pct >= 5.0 and not trade.partial_taken_5:
                     close_amount = trade.invested * 0.3
                     self.balance += close_amount * (1 + pnl_pct/100)
@@ -302,7 +375,6 @@ class FinalHighWinRateEngine:
                     trade.partial_taken_7 = True
                     await self.send_tg(f"📌 *جني أرباح 30% إضافية* عند +7% لـ {sym} (ربح {pnl_pct:.2f}%)")
 
-                # إدارة وقف الخسارة
                 if trade.stop_loss == 0:
                     initial_sl = max(trade.entry_price - (trade.signal.atr * ATR_MULTIPLIER), trade.entry_price * 0.975)
                     trade.stop_loss = initial_sl
@@ -313,7 +385,6 @@ class FinalHighWinRateEngine:
                             trade.stop_loss = new_stop
                             await self.send_tg(f"🔒 تحديث الوقف المتحرك لـ {sym} → {trade.stop_loss:.4f}")
 
-                # الخروج عند الوقف
                 if current_price <= trade.stop_loss:
                     final_pnl = (current_price - trade.entry_price) / trade.entry_price * 100
                     result = {
@@ -331,7 +402,6 @@ class FinalHighWinRateEngine:
                     await self.send_tg(f"🏁 *إغلاق صفقة* {sym}\nالنتيجة: `{final_pnl:.2f}%`\nالسبب: وقف الخسارة")
                     continue
 
-                # خروج كامل عند +10%
                 if pnl_pct >= 10.0 and not panic:
                     final_pnl = pnl_pct
                     result = {
@@ -349,7 +419,6 @@ class FinalHighWinRateEngine:
                     continue
 
                 self._save_trade_state(trade)
-
             except Exception as e:
                 print(f"Error monitoring {sym}: {e}")
 
@@ -388,13 +457,41 @@ class FinalHighWinRateEngine:
         except:
             print("بداية جديدة ...")
 
+    async def refresh_symbol_list(self, ex):
+        try:
+            markets = await ex.fetch_markets()
+            all_symbols = [m['symbol'] for m in markets if m['symbol'].endswith('/USDT') and m['active']]
+            filtered = [sym for sym in all_symbols if sym.split('/')[0] not in LARGE_COINS]
+            self.all_usdt_symbols = filtered
+            print(f"تم تحميل {len(self.all_usdt_symbols)} عملة صغيرة")
+            await self.send_tg(f"🔄 تم تحديث قائمة العملات الصغيرة: {len(self.all_usdt_symbols)} عملة.")
+            import random
+            random.shuffle(self.all_usdt_symbols)
+        except Exception as e:
+            print(f"خطأ في جلب قائمة العملات: {e}")
+
+    async def scan_batch(self, ex, batch_symbols):
+        signals = []
+        for sym in batch_symbols:
+            if sym in self.active_trades:
+                continue
+            try:
+                ticker = await ex.fetch_ticker(sym)
+                if ticker.get('quoteVolume', 0) < 50000 or ticker.get('percentage', -100) < 0.5:
+                    continue
+            except:
+                continue
+            signal = await self.analyze_opportunity(ex, sym)
+            if signal:
+                signals.append(signal)
+            await asyncio.sleep(0.3)
+        return signals
+
     async def reentry_smart(self, ex, closed_trade):
-        """إعادة دخول ذكي: إذا حققت صفقة ربح >4% ومرت 30 دقيقة، يمكن إعادة الدخول إذا ظل الشرط"""
         if closed_trade.get("pnl", 0) >= 4.0:
             sym = closed_trade["symbol"]
             if sym in self.cooldown_list and datetime.now() < self.cooldown_list[sym]:
                 return None
-            # تقليل وقت التبريد إلى 30 دقيقة للعملات التي حققت ربحاً
             signal = await self.analyze_opportunity(ex, sym)
             if signal:
                 return signal
@@ -410,7 +507,7 @@ app = Flask(__name__)
 def index():
     return render_template_string("""
     <body style="background:#020617; color:#f1f5f9; font-family:sans-serif; padding:20px;">
-        <h1 style="color:#38bdf8;">🔥 Empire Final High Win‑Rate 🔥</h1>
+        <h1 style="color:#38bdf8;">🔥 Empire Target Gain Filter (≥5%) 🔥</h1>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; margin:20px 0;">
             <div style="background:#1e293b; padding:20px; border-radius:12px;">
                 <small>الرصيد الورقي</small><br><strong style="font-size:1.8rem;">{{ "%.2f"|format(balance) }} USDT</strong>
@@ -424,10 +521,11 @@ def index():
         </div>
         <h3>🚀 الصفقات المفتوحة</h3>
         <table style="width:100%; background:#0f172a;">
-            <tr style="background:#334155;"><th>العملة</th><th>الدخول</th><th>الوقف</th><th>الربح الحالي%</th></tr>
+            <tr style="background:#334155;"><th>العملة</th><th>الدخول</th><th>الهدف المتوقع</th><th>الربح الحالي%</th></tr>
             {% for sym, t in active.items() %}
             <tr>
-                <td>{{ sym }}</td><td>{{ t.entry_price }}</td><td>{{ t.stop_loss }}</td>
+                <td>{{ sym }}</td><td>{{ t.entry_price }}</td>
+                <td style="color:#facc15;">{{ "%.1f"|format(t.signal.expected_gain) }}%</td>
                 <td style="color:{{ '#4ade80' if t.highest_price > t.entry_price else '#f87171' }};">{{ "%.2f"|format(((t.highest_price - t.entry_price)/t.entry_price)*100) }}%</td>
             </tr>
             {% endfor %}
@@ -445,7 +543,7 @@ def index():
     """, balance=engine.balance, active=engine.active_trades, panic=engine.panic_mode, history=engine.closed_trades)
 
 @app.route('/health')
-def health(): return "Empire Final High WinRate Online", 200
+def health(): return "Empire Target Gain Filter Online", 200
 
 def keep_alive():
     while True:
@@ -459,14 +557,29 @@ def keep_alive():
 async def main_loop():
     ex = ccxt_async.gateio({'enableRateLimit': True})
     engine.load_all()
-    await engine.send_tg("🚀 *تشغيل البوت الإمبراطوري النهائي v7.0*\nنسبة النجاح المستهدفة >80% مع أهداف تدريجية (5% / 7% / 10%).")
+    await engine.send_tg("🚀 *تشغيل الماسح الإمبراطوري - فلتر الهدف ≥5%* \n✅ استبعاد العملات الكبيرة\n✅ مسح 1500 عملة\n✅ الدخول فقط إذا كان الهدف المتوقع ≥5%")
+    await engine.refresh_symbol_list(ex)
+    if not engine.all_usdt_symbols:
+        await engine.send_tg("⚠️ لم يتم العثور على عملات صغيرة.")
+        return
+    
+    total_symbols = len(engine.all_usdt_symbols)
+    scan_limit = min(TOTAL_SCAN_TARGET, total_symbols)
+    import random
+    random.shuffle(engine.all_usdt_symbols)
     last_closed_count = len(engine.closed_trades)
+    batch_index = 0
+    
     while True:
         await engine.monitor_trades(ex)
-
-        # إعادة الدخول الذكي: بعد كل دورة، تحقق من الصفقات المغلقة حديثاً
+        
+        if datetime.now().minute == 0:
+            await engine.refresh_symbol_list(ex)
+            random.shuffle(engine.all_usdt_symbols)
+            batch_index = 0
+        
         if len(engine.closed_trades) > last_closed_count:
-            for closed in engine.closed_trades[:1]:  # آخر صفقة
+            for closed in engine.closed_trades[:1]:
                 new_signal = await engine.reentry_smart(ex, closed)
                 if new_signal and len(engine.active_trades) < MAX_CONCURRENT_TRADES and not engine.panic_mode:
                     trade_amount = engine.balance * RISK_PER_TRADE * 3
@@ -483,43 +596,50 @@ async def main_loop():
                     engine.active_trades[new_signal.symbol] = trade
                     engine.balance -= trade_amount
                     engine._save_trade_state(trade)
-                    await engine.send_tg(f"🔄 *إعادة دخول ذكي* على {new_signal.symbol} بعد تحقيق ربح سابق.")
+                    await engine.send_tg(f"🔄 *إعادة دخول ذكي* على {new_signal.symbol} (هدف {new_signal.expected_gain:.1f}%)")
             last_closed_count = len(engine.closed_trades)
-
+        
         if not engine.panic_mode and len(engine.active_trades) < MAX_CONCURRENT_TRADES:
-            try:
-                tickers = await ex.fetch_tickers()
-                candidates = [s for s, t in tickers.items() if s.endswith('/USDT') and t.get('quoteVolume', 0) > 100000]
-                for sym in candidates[:50]:
-                    if sym in engine.active_trades:
-                        continue
-                    signal = await engine.analyze_opportunity(ex, sym)
-                    if signal:
-                        trade_amount = engine.balance * RISK_PER_TRADE * 3
-                        trade = TradeInfo(
-                            symbol=sym,
-                            signal=signal,
-                            entry_price=signal.entry_price,
-                            invested=trade_amount,
-                            highest_price=signal.entry_price,
-                            stop_loss=0,
-                            partial_taken_5=False,
-                            partial_taken_7=False
-                        )
-                        engine.active_trades[sym] = trade
-                        engine.balance -= trade_amount
-                        engine._save_trade_state(trade)
-                        reasons_text = "\n".join([f"• {r}" for r in signal.reasons])
-                        await engine.send_tg(
-                            f"🔔 *إشارة انفجار قوية*\n"
-                            f"العملة: `{sym}`\n"
-                            f"السعر: `{signal.entry_price}`\n"
-                            f"نسبة الحجم: `{signal.vol_ratio:.2f}x`\n"
-                            f"RSI السريع: `{signal.rsi_fast:.0f}`\n"
-                            f"الأسباب:\n{reasons_text}"
-                        )
-            except Exception as e:
-                print(f"خطأ في الدورة: {e}")
+            start = batch_index * BATCH_SIZE
+            end = min(start + BATCH_SIZE, scan_limit)
+            if start >= scan_limit:
+                batch_index = 0
+                start = 0
+                end = min(BATCH_SIZE, scan_limit)
+            
+            batch_symbols = engine.all_usdt_symbols[start:end]
+            if batch_symbols:
+                print(f"مسح الدفعة {batch_index+1}: {len(batch_symbols)} عملة")
+                signals = await engine.scan_batch(ex, batch_symbols)
+                for sig in signals:
+                    if len(engine.active_trades) >= MAX_CONCURRENT_TRADES:
+                        break
+                    trade_amount = engine.balance * RISK_PER_TRADE * 3
+                    trade = TradeInfo(
+                        symbol=sig.symbol,
+                        signal=sig,
+                        entry_price=sig.entry_price,
+                        invested=trade_amount,
+                        highest_price=sig.entry_price,
+                        stop_loss=0,
+                        partial_taken_5=False,
+                        partial_taken_7=False
+                    )
+                    engine.active_trades[sig.symbol] = trade
+                    engine.balance -= trade_amount
+                    engine._save_trade_state(trade)
+                    reasons_text = "\n".join([f"• {r}" for r in sig.reasons])
+                    await engine.send_tg(
+                        f"🔔 *إشارة انفجار قوية* (هدف {sig.expected_gain:.1f}%)\n"
+                        f"العملة: `{sig.symbol}`\n"
+                        f"السعر: `{sig.entry_price}`\n"
+                        f"نسبة الحجم: `{sig.vol_ratio:.2f}x`\n"
+                        f"RSI السريع: `{sig.rsi_fast:.0f}`\n"
+                        f"الأسباب:\n{reasons_text}"
+                    )
+                    await asyncio.sleep(1)
+                batch_index += 1
+        
         await asyncio.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
