@@ -741,7 +741,7 @@ class OptimizedFirstStationEngine:
         self.scan_count = 0
         self.symbols_info = []
 
-        async def run(self):
+    async def run(self):
         global engine_instance
         engine_instance = self
         # ضبط سرعة الطلبات لضمان عدم الحظر
