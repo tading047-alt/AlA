@@ -25,8 +25,8 @@ MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 INITIAL_BALANCE = 1000.0
-MAX_CONCURRENT_TRADES = 5  # 5 صفقات × 20% = 100% استغلال
-SCAN_INTERVAL = 10 
+MAX_CONCURRENT_TRADES = 5
+SCAN_INTERVAL = 10
 
 @dataclass
 class TrainSignal:
@@ -91,36 +91,39 @@ class ImperialMasterEngine:
                 sig = TrainSignal(**d.pop('signal'))
                 self.active_trades[d['symbol']] = TradeInfo(**d, signal=sig)
             conn.close()
-        except: pass
+        except:
+            pass
 
     async def send_tg(self, msg: str):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-        except: pass
+        except:
+            pass
 
     async def analyze(self, ex, symbol):
         try:
-            # 1. تحليل الفريم الكبير (15 دقيقة) - تحديد الاتجاه
+            # فريم 15 دقيقة لتحديد الاتجاه الصاعد
             ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-            df_15 = pd.DataFrame(ohlcv_15, columns=['t','o','h','l','c','v'])
+            df_15 = pd.DataFrame(ohlcv_15, columns=['t', 'o', 'h', 'l', 'c', 'v'])
             ema_50_15 = df_15['c'].ewm(span=50).mean().iloc[-1]
-            if df_15['c'].iloc[-1] < ema_50_15: return None 
+            if df_15['c'].iloc[-1] < ema_50_15:
+                return None
 
-            # 2. تحليل فريم الدخول (5 دقائق) - استراتيجية BB + RSI + Volume
+            # فريم 5 دقائق: Bollinger Bands + RSI + حجم
             ohlcv_5 = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=50)
-            df_5 = pd.DataFrame(ohlcv_5, columns=['t','o','h','l','c','v'])
-            
+            df_5 = pd.DataFrame(ohlcv_5, columns=['t', 'o', 'h', 'l', 'c', 'v'])
+
             sma = df_5['c'].rolling(20).mean()
             std = df_5['c'].rolling(20).std()
-            upper_bb = (sma + 2*std).iloc[-1]
-            
+            upper_bb = (sma + 2 * std).iloc[-1]
+
             delta = df_5['c'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + gain/(loss + 1e-9)))
-            
+            rsi = 100 - (100 / (1 + gain / (loss + 1e-9)))
+
             last_c = df_5['c'].iloc[-1]
             vol_avg = df_5['v'].rolling(10).mean().iloc[-2]
 
@@ -131,10 +134,11 @@ class ImperialMasterEngine:
             if is_breakout and is_momentum and is_volume:
                 return TrainSignal(symbol=symbol, entry_price=last_c, strategy_name="نظام الامتياز (15m/5m)", timeframe_confirmed=True)
             return None
-        except: return None
+        except:
+            return None
 
 # =========================================================
-# 🌐 واجهة الويب والتحميل (المصححة)
+# 🌐 واجهة الويب (تم إصلاح القالب HTML)
 # =========================================================
 app = Flask(__name__)
 engine = ImperialMasterEngine()
@@ -144,7 +148,8 @@ def dashboard():
     active_inv = sum([t.invested for t in engine.active_trades.values()])
     equity = engine.balance + active_inv
     v_count = len(engine.virtual_trades)
-    
+
+    # لاحظ: تم إغلاق الـ triple-quoted string بشكل صحيح
     html_template = """
     <html dir="rtl"><head><meta charset="UTF-8"><title>Empire V8 Final</title>
     <style>
@@ -166,14 +171,15 @@ def dashboard():
             <a href="/dl_real" class="btn">📥 تحميل سجل الأرباح</a>
             <a href="/dl_missed" class="btn" style="background:#fbbf24;">📥 تحميل سجل التحليل</a>
         </div>
-        
+
         <h2>🟢 صفقات حقيقية ({{ active|length }}/5)</h2>
         <table>
             <tr style="background:#334155;"><th>العملة</th><th>المبلغ المستثمر</th><th>الربح العائم</th><th>الحالة</th></tr>
             {% for s, t in active.items() %}
             <tr><td><b>{{ s }}</b></td><td>{{ "%.2f"|format(t.invested) }}</td>
             <td class="profit">{{ "%.2f"|format(((t.highest_price - t.entry_price)/t.entry_price)*100) }}%</td>
-            <td>{{ "🛡️ مؤمنة" if t.is_secured else "⚡ نشطة" }}</td></tr>
+            <td>{{ "🛡️ مؤمنة" if t.is_secured else "⚡ نشطة" }}</td>
+            </tr>
             {% endfor %}
         </table>
 
@@ -185,61 +191,131 @@ def dashboard():
             {% endfor %}
         </table>
     </body></html>
-    """
+    """  # انتهى القالب بشكل صحيح
+
     return render_template_string(html_template, balance=engine.balance, equity=equity, active=engine.active_trades, virtual=engine.virtual_trades, v_count=v_count)
 
 @app.route('/dl_real')
-def dl_r(): return send_file(REAL_CSV, as_attachment=True)
+def dl_r():
+    return send_file(REAL_CSV, as_attachment=True)
 
 @app.route('/dl_missed')
-def dl_m(): return send_file(MISSED_CSV, as_attachment=True)
+def dl_m():
+    return send_file(MISSED_CSV, as_attachment=True)
 
 # =========================================================
-# 🔄 محرك المعالجة والتلجرام
+# 🔄 محرك المعالجة والتلجرام (تم إكمال شرط if)
 # =========================================================
 async def main_loop():
     ex = ccxt_async.gateio({'enableRateLimit': True})
     markets = await ex.fetch_markets()
     symbols = [m['symbol'] for m in markets if m['symbol'].endswith('/USDT') and m['active']]
-    
+
     await engine.send_tg("🚀 *تم إطلاق النسخة V8.1 المصححة*\n- نظام الفريمات المزدوجة مفعل\n- تتبع الفرص الضائعة مفعل\n- إدارة المحفظة 20% مفعله")
 
     while True:
+        # مراقبة الصفقات المفتوحة وتحديثها
         combined = {**engine.active_trades, **engine.virtual_trades}
         for sym, trade in list(combined.items()):
             try:
-                t_data = await ex.fetch_ticker(sym); curr = t_data['last']
+                t_data = await ex.fetch_ticker(sym)
+                curr = t_data['last']
                 pnl = (curr - trade.entry_price) / trade.entry_price * 100
-                if curr > trade.highest_price: trade.highest_price = curr
-                
+                if curr > trade.highest_price:
+                    trade.highest_price = curr
+
+                # تأمين الصفقة عند ربح 1.5%
                 if not trade.is_virtual and pnl >= 1.5 and not trade.is_secured:
-                    trade.stop_loss = trade.entry_price; trade.is_secured = True
+                    trade.stop_loss = trade.entry_price
+                    trade.is_secured = True
+                    engine._save_state()
                     await engine.send_tg(f"🛡️ *تأمين صفقة {sym}*\nنقطة الدخول أصبحت هي الوقف.")
 
-                exit_r = ""
-                if pnl <= -2.5: exit_r = "Stop Loss"
-                elif pnl >= 6.0: exit_r = "Target Hit"
+                exit_reason = ""
+                if pnl <= -2.5:
+                    exit_reason = "Stop Loss"
+                elif pnl >= 6.0:
+                    exit_reason = "Target Hit"
 
-                if exit_r:
-                    path = MISSED_CSV if trade.is_virtual else REAL_CSV
-                    with open(path, 'a', newline='') as f:
-                        writer = csv.writer(f); writer.writerow([datetime.now(), sym, trade.signal.strategy_name, trade.entry_price, curr, f"{pnl:.2f}", exit_r])
-                    
-                    if trade.is_virtual: del engine.virtual_trades[sym]
+                if exit_reason:
+                    csv_path = MISSED_CSV if trade.is_virtual else REAL_CSV
+                    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sym,
+                                         trade.signal.strategy_name, trade.entry_price, curr,
+                                         f"{pnl:.2f}", exit_reason])
+
+                    if trade.is_virtual:
+                        del engine.virtual_trades[sym]
                     else:
-                        engine.balance += trade.invested * (1 + pnl/100)
-                        del engine.active_trades[sym]; engine._save_state()
-                        await engine.send_tg(f"🏁 *إغلاق حقيقي {sym}*\nالنتيجة: `{pnl:.2f}%`\nالسبب: `{exit_r}`")
-            except: pass
+                        engine.balance += trade.invested * (1 + pnl / 100)
+                        del engine.active_trades[sym]
+                        engine._save_state()
+                        await engine.send_tg(f"🏁 *إغلاق حقيقي {sym}*\nالنتيجة: `{pnl:.2f}%`\nالسبب: `{exit_reason}`")
+            except:
+                pass
 
+        # البحث عن إشارات جديدة
         import random
         batch = random.sample(symbols, min(len(symbols), 35))
         tasks = [engine.analyze(ex, s) for s in batch]
         results = await asyncio.gather(*tasks)
-        
+
         for sig in results:
             if sig and sig.symbol not in engine.active_trades and sig.symbol not in engine.virtual_trades:
-                if len(engine.active_trades) < MAX_CONCURRENT_TRADES:
-                    equity = engine.balance + sum([t.invested for t in engine.active_trades.values()])
-                    invest = equity * 0.20
-                    if engine.balance >=
+                equity = engine.balance + sum(t.invested for t in engine.active_trades.values())
+                invest = equity * 0.20
+
+                # الشرط مكتمل بشكل صحيح
+                if len(engine.active_trades) < MAX_CONCURRENT_TRADES and engine.balance >= invest:
+                    # فتح صفقة حقيقية
+                    trade_obj = TradeInfo(
+                        symbol=sig.symbol,
+                        signal=sig,
+                        entry_price=sig.entry_price,
+                        invested=invest,
+                        highest_price=sig.entry_price,
+                        stop_loss=sig.entry_price * 0.975,
+                        is_virtual=False,
+                        is_secured=False
+                    )
+                    engine.active_trades[sig.symbol] = trade_obj
+                    engine.balance -= invest
+                    engine._save_state()
+                    await engine.send_tg(
+                        f"🟢 *صفقة شراء حقيقية*\n"
+                        f"العملة: {sig.symbol}\n"
+                        f"السعر: {sig.entry_price:.8f}\n"
+                        f"المستثمر: {invest:.2f} USDT\n"
+                        f"الاستراتيجية: {sig.strategy_name}"
+                    )
+                else:
+                    # فتح صفقة افتراضية (فرصة ضائعة)
+                    virtual_trade = TradeInfo(
+                        symbol=sig.symbol,
+                        signal=sig,
+                        entry_price=sig.entry_price,
+                        invested=0.0,
+                        highest_price=sig.entry_price,
+                        stop_loss=sig.entry_price * 0.975,
+                        is_virtual=True,
+                        is_secured=False
+                    )
+                    engine.virtual_trades[sig.symbol] = virtual_trade
+                    # (اختياري) يمكن إرسال إشعار للفرص الضائعة إذا أردت
+
+        await asyncio.sleep(SCAN_INTERVAL)
+
+# =========================================================
+# 🚀 تشغيل الخادم والمحرك مع دعم PORT لـ Render
+# =========================================================
+def run_flask():
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    asyncio.run(main_loop())
