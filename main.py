@@ -422,11 +422,11 @@ class OptimizedFirstStationDetector:
     def __init__(self, learner: TradeLearner):
         self.learner = learner
         self.base_patterns = {
-            'calm': {'name': '🌊 هدوء', 'weight': 30},
-            'whale': {'name': '🐋 حيتان', 'weight': 35},
-            'bollinger': {'name': '🎯 بولنجر', 'weight': 25},
-            'divergence': {'name': '📈 تباعد', 'weight': 30},
-            'volume': {'name': '💥 انفجار', 'weight': 30}
+            'calm': {'name': '🌊 هدوء', 'weight': 50},
+            'whale': {'name': '🐋 حيتان', 'weight': 55},
+            'bollinger': {'name': '🎯 بولنجر', 'weight': 45},
+            'divergence': {'name': '📈 تباعد', 'weight': 50},
+            'volume': {'name': '💥 انفجار', 'weight': 50}
         }
     async def filter_symbols(self, exchange, limit: int = SCAN_SYMBOLS_LIMIT) -> List[dict]:
         """تعديل: جلب حي للعملات في كل دورة لتجنب القائمة الميتة"""
