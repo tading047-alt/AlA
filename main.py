@@ -34,12 +34,12 @@ BOT_TAG = "#محطة_أولى_500"
 # إعدادات التداول
 # =========================================================
 TOTAL_CAPITAL = 1000.0
-MAX_TRADES_PER_DAY = 20
-CAPITAL_PER_TRADE = 100.0
-MAX_CONCURRENT_TRADES = 10
-SCAN_INTERVAL = 45
-MIN_CONFIDENCE = 55
-SCAN_BATCH_SIZE = 50
+MAX_TRADES_PER_DAY = 50
+CAPITAL_PER_TRADE = 50
+MAX_CONCURRENT_TRADES = 15
+SCAN_INTERVAL = 30
+MIN_CONFIDENCE = 45
+SCAN_BATCH_SIZE = 100
 
 # =========================================================
 # إعدادات الملفات وقاعدة البيانات
