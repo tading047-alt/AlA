@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🚂 نظام ركوب القطار من المحطة الأولى - الإصدار النهائي المتكامل
-First Station Train Rider - Final Integrated Edition
+🚂 نظام ركوب القطار - وضع التحليل المكثف (2000 عملة)
+First Station Train Rider - Intensive Analysis Mode
 
-المميزات:
-✅ رأس مال 1000$ مقسم على صفقات (قابل للتعديل)
-✅ مسح 200 عملة مع فلترة ذكية
-✅ لوحة تحكم ويب متكاملة (حالة السوق، البوت، المسح، المنصة)
-✅ قياس مدة المسح وإظهارها
-✅ تتبع افتراضي للصفقات المرفوضة
-✅ قاعدة بيانات SQLite
-✅ روابط تحميل CSV
-✅ إشعارات تليجرام
-✅ جميع التحسينات (فلتر السوق، تأكيد سريع، تعلم)
+إعدادات خاصة لجمع أكبر عدد ممكن من الصفقات للتحليل السريع
+⚠️ تحذير: هذه الإعدادات للحساب التجريبي فقط! ⚠️
 """
 
 import asyncio
@@ -39,19 +31,19 @@ from enum import Enum
 # =========================================================
 TELEGRAM_TOKEN = "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68"
 TELEGRAM_CHAT_ID = "5067771509"
-BOT_TAG = "#محطة_أولى_نهائي"
+BOT_TAG = "#تحليل_مكثف"
 
 # =========================================================
-# إعدادات التداول (موصى بها - قابلة للتعديل)
+# ⚡ إعدادات التحليل المكثف (للتجربة فقط)
 # =========================================================
 TOTAL_CAPITAL = 1000.0
-MAX_TRADES_PER_DAY = 12
-CAPITAL_PER_TRADE = 100.0
-MAX_CONCURRENT_TRADES = 4
-SCAN_INTERVAL = 45
-MIN_CONFIDENCE = 58
-SCAN_BATCH_SIZE = 50
-SCAN_SYMBOLS_LIMIT = 200  # عدد العملات المراد مسحها بعد الفلترة
+MAX_TRADES_PER_DAY = 50          # فتح حتى 50 صفقة يومياً
+CAPITAL_PER_TRADE = 50.0         # 50$ لكل صفقة (لتوزيع المخاطر)
+MAX_CONCURRENT_TRADES = 15       # 15 صفقة متزامنة
+SCAN_INTERVAL = 30               # مسح كل 30 ثانية
+MIN_CONFIDENCE = 45              # قبول إشارات أضعف
+SCAN_BATCH_SIZE = 100            # معالجة 100 عملة دفعة واحدة
+SCAN_SYMBOLS_LIMIT = 2000        # مسح 2000 عملة بعد الفلترة الأولية
 
 # =========================================================
 # إعدادات الملفات وقاعدة البيانات
@@ -99,7 +91,7 @@ def update_db_status(capital, available, active, daily, win_rate, regime, btc_ch
     conn.close()
 
 # =========================================================
-# أنواع البيانات
+# أنواع البيانات (بدون تغيير)
 # =========================================================
 class MarketRegime(Enum):
     TRENDING_BULLISH = "trending_bullish"
@@ -156,7 +148,7 @@ class VirtualTrade:
     rejection_reason: str
 
 # =========================================================
-# نظام التسجيل
+# نظام التسجيل (بدون تغيير)
 # =========================================================
 class CSVLogger:
     def __init__(self):
@@ -222,7 +214,7 @@ class CSVLogger:
             print(f"⚠️ CSV: {e}")
 
 # =========================================================
-# نظام التعلم
+# نظام التعلم (بدون تغيير)
 # =========================================================
 class TradeLearner:
     def __init__(self):
@@ -306,7 +298,7 @@ class TradeLearner:
         return 0
 
 # =========================================================
-# فلتر حالة السوق
+# فلتر حالة السوق (مع تخفيف القيود لوضع التحليل)
 # =========================================================
 class MarketRegimeFilter:
     def __init__(self):
@@ -322,28 +314,32 @@ class MarketRegimeFilter:
             ema20, ema50 = self._calculate_ema(closes, 20), self._calculate_ema(closes, 50)
             trend = "bullish" if ema20[-1] > ema50[-1] else "bearish"
             btc_change_1h = ((closes[-1] - closes[-4]) / closes[-4]) * 100 if len(closes) >= 4 else 0
+            
+            # تخفيف القيود لوضع التحليل: السماح بالتداول في معظم الأحوال
             if adx < 20:
                 regime = MarketRegime.RANGING
-                allowed_patterns = ['هدوء', 'بولنجر']
-                min_confidence, allocation_multiplier, can_trade = 70, 0.6, btc_change_1h > -1.5
-                reason = "سوق جانبي"
+                allowed_patterns = ['هدوء', 'بولنجر', 'حيتان', 'انفجار']  # سماح أوسع
+                min_confidence, allocation_multiplier, can_trade = 45, 0.8, True  # ثقة أقل، دائماً مسموح
+                reason = "سوق جانبي (تحليل)"
             elif adx > 25 and trend == "bullish":
                 regime = MarketRegime.TRENDING_BULLISH
                 allowed_patterns = ['حيتان', 'انفجار', 'تباعد', 'هدوء', 'بولنجر']
-                min_confidence, allocation_multiplier, can_trade = 55, 1.0, btc_change_1h > -1.0
+                min_confidence, allocation_multiplier, can_trade = 40, 1.0, True
                 reason = "سوق صاعد"
             elif adx > 25 and trend == "bearish":
                 regime = MarketRegime.TRENDING_BEARISH
-                allowed_patterns = ['تباعد']
-                min_confidence, allocation_multiplier, can_trade = 75, 0.5, btc_change_1h > -2.0
-                reason = "سوق هابط"
+                allowed_patterns = ['تباعد', 'هدوء']  # سماح إضافي
+                min_confidence, allocation_multiplier, can_trade = 50, 0.6, True
+                reason = "سوق هابط (تحليل)"
             else:
                 regime = MarketRegime.TRANSITIONAL
-                allowed_patterns = ['هدوء', 'حيتان']
-                min_confidence, allocation_multiplier, can_trade = 65, 0.8, btc_change_1h > -1.0
+                allowed_patterns = ['هدوء', 'حيتان', 'بولنجر']
+                min_confidence, allocation_multiplier, can_trade = 45, 0.9, True
                 reason = "انتقالي"
-            if btc_change_1h < -3.0:
-                can_trade, reason = False, f"🚫 BTC ينهار ({btc_change_1h:.1f}%)"
+            
+            # تعطيل فلتر انهيار BTC مؤقتاً للتحليل
+            # if btc_change_1h < -3.0: can_trade = False
+            
             self.regime_data = {
                 'regime': regime.value, 'trend': trend, 'adx': round(adx,1),
                 'btc_change_1h': round(btc_change_1h,2), 'can_trade': can_trade,
@@ -352,7 +348,7 @@ class MarketRegimeFilter:
             }
             return self.regime_data
         except:
-            return {'can_trade': True, 'reason': 'خطأ', 'allowed_patterns': [], 'min_confidence':60, 'allocation_multiplier':0.8}
+            return {'can_trade': True, 'reason': 'خطأ', 'allowed_patterns': [], 'min_confidence':40, 'allocation_multiplier':0.8}
 
     def _calculate_adx(self, high, low, close, period=14):
         if len(close) < period+1: return 20
@@ -375,7 +371,7 @@ class MarketRegimeFilter:
         return ema
 
 # =========================================================
-# كاشف ما قبل الاشتعال
+# كاشف ما قبل الاشتعال (بدون تغيير)
 # =========================================================
 class PreIgnitionDetector:
     def detect(self, ohlcv_1m: np.ndarray) -> dict:
@@ -398,7 +394,7 @@ class PreIgnitionDetector:
         return {'detected': score >= 50, 'score': score, 'signals': signals, 'entry_bonus': score >= 70}
 
 # =========================================================
-# فلتر التأكيد السريع
+# فلتر التأكيد السريع (مع تخفيف)
 # =========================================================
 class QuickConfirmationFilter:
     async def confirm(self, exchange, symbol: str, signal: StationSignal) -> dict:
@@ -406,25 +402,21 @@ class QuickConfirmationFilter:
             ticker = await exchange.fetch_ticker(symbol)
             confirmations, confirmed, extra_confidence = [], True, 0
             volume = ticker.get('quoteVolume', 0)
-            if volume > 200000: confirmations.append("✅ حجم كبير"); extra_confidence += 5
-            elif volume < 50000: confirmations.append("⚠️ حجم منخفض"); confirmed = False
+            if volume > 100000: confirmations.append("✅ حجم جيد"); extra_confidence += 5
+            elif volume < 20000: confirmations.append("⚠️ حجم منخفض"); # لا نرفض، فقط نحذر
             bid, ask = ticker.get('bid',0), ticker.get('ask',0)
             if bid>0 and ask>0:
                 spread = (ask-bid)/bid*100
-                if spread > 0.3: confirmations.append(f"⚠️ سبريد {spread:.2f}%"); confirmed = False
+                if spread > 0.5: confirmations.append(f"⚠️ سبريد {spread:.2f}%")
                 else: extra_confidence += 5
             change = ticker.get('percentage', 0)
-            if 0.5 < change < 8.0: confirmations.append(f"✅ +{change:.1f}%"); extra_confidence += 10
-            elif change > 15: confirmations.append(f"⚠️ مرتفع +{change:.1f}%"); confirmed = False
-            elif change < -5: confirmations.append(f"⚠️ هابط {change:.1f}%"); confirmed = False
+            if -5 < change < 15: confirmations.append(f"✅ تغير {change:.1f}%"); extra_confidence += 5
             current_price = ticker['last']
-            price_diff = abs(current_price - signal.entry_price)/signal.entry_price*100
-            if price_diff > 1.0: confirmations.append(f"⚠️ تغير السعر {price_diff:.1f}%"); confirmed = False
-            return {'confirmed': confirmed, 'confirmations': confirmations, 'extra_confidence': extra_confidence, 'current_price': current_price}
-        except: return {'confirmed': False, 'confirmations': [], 'extra_confidence': 0}
+            return {'confirmed': True, 'confirmations': confirmations, 'extra_confidence': extra_confidence, 'current_price': current_price}
+        except: return {'confirmed': True, 'confirmations': [], 'extra_confidence': 0}
 
 # =========================================================
-# كاشف المحطة الأولى المحسن
+# كاشف المحطة الأولى المحسن (مع فلترة حجم أقل)
 # =========================================================
 class OptimizedFirstStationDetector:
     def __init__(self, learner: TradeLearner):
@@ -438,25 +430,26 @@ class OptimizedFirstStationDetector:
         }
 
     async def filter_symbols(self, exchange, limit: int = SCAN_SYMBOLS_LIMIT) -> List[dict]:
-        print(f"📊 جلب العملات...")
+        print(f"📊 جلب العملات (الهدف {limit} عملة)...")
         try:
             tickers = await exchange.fetch_tickers()
             promising = []
             for symbol, ticker in tickers.items():
                 if not symbol.endswith('/USDT'): continue
                 volume = ticker.get('quoteVolume', 0)
-                if volume < 50000: continue
+                if volume < 20000: continue  # خفض الحد إلى 20k
                 change = ticker.get('percentage', 0)
-                if change > 30 or change < -20: continue
+                if change > 40 or change < -30: continue  # توسيع النطاق
                 price = ticker.get('last', 0)
-                if price < 0.000001: continue
+                if price < 0.0000001: continue  # خفض حد السعر
                 bid, ask = ticker.get('bid',0), ticker.get('ask',0)
                 spread = ((ask-bid)/bid*100) if bid>0 else 0
-                if spread > 0.5: continue
+                if spread > 1.0: continue  # توسيع حد السبريد
                 promising.append({'symbol': symbol, 'volume': volume, 'price': price, 'change': change, 'spread': spread})
             promising.sort(key=lambda x: x['volume'], reverse=True)
-            print(f"✅ {min(len(promising), limit)} عملة")
-            return promising[:limit]
+            selected = promising[:limit]
+            print(f"✅ تم اختيار {len(selected)} عملة")
+            return selected
         except Exception as e:
             print(f"❌ فلترة: {e}")
             return []
@@ -471,15 +464,15 @@ class OptimizedFirstStationDetector:
                 if isinstance(result, StationSignal): all_signals.append(result)
             progress = min(i + SCAN_BATCH_SIZE, total)
             print(f"  📊 {progress}/{total} ({progress*100//total}%)")
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.15)  # تقليل الانتظار
         all_signals.sort(key=lambda x: x.confidence, reverse=True)
         return all_signals
 
     async def _analyze_single(self, exchange, info: dict) -> Optional[StationSignal]:
         symbol = info['symbol']
         try:
-            ohlcv = await exchange.fetch_ohlcv(symbol, '5m', limit=50)
-            if len(ohlcv) < 30: return None
+            ohlcv = await exchange.fetch_ohlcv(symbol, '5m', limit=40)  # تقليل إلى 40 شمعة
+            if len(ohlcv) < 20: return None  # تقليل الحد الأدنى
             data = np.array(ohlcv)
             closes, volumes, highs = data[:,4], data[:,5], data[:,2]
             current_price = info['price']
@@ -496,7 +489,7 @@ class OptimizedFirstStationDetector:
             if vol_break['detected']: detected.append('volume'); total_confidence += self.base_patterns['volume']['weight']; all_reasons.append(vol_break['reason'])
             breakout = self._check_breakout(highs, closes)
             if breakout['detected']: total_confidence += 20; all_reasons.append(breakout['reason'])
-            if total_confidence >= 40:
+            if total_confidence >= 30:  # خفض الحد الأدنى
                 if len(detected) >= 3: pattern_type, expected_move, time_to_explode = "🔥 اشتعال", 12.0, 60
                 elif len(detected) >= 2: pattern_type, expected_move, time_to_explode = "⚡ ما قبل الانفجار", 8.0, 120
                 else: pattern_type, expected_move, time_to_explode = "📊 تجميع", 5.0, 180
@@ -508,43 +501,44 @@ class OptimizedFirstStationDetector:
         except: pass
         return None
 
+    # دوال الفحص (مثل النسخة السابقة مع تعديلات طفيفة)
     def _check_calm(self, volumes, closes): 
-        if len(volumes)<20: return {'detected':False}
-        vol_ratio = np.mean(volumes[-8:])/np.mean(volumes[-20:-8]) if np.mean(volumes[-20:-8])>0 else 1
-        price_range = (np.max(closes[-10:])-np.min(closes[-10:]))/np.mean(closes[-10:])*100
-        if vol_ratio<0.5 and price_range<2.5: return {'detected':True, 'reason':f'🌊 هدوء (حجم {vol_ratio*100:.0f}%)'}
+        if len(volumes)<15: return {'detected':False}
+        vol_ratio = np.mean(volumes[-6:])/np.mean(volumes[-15:-6]) if np.mean(volumes[-15:-6])>0 else 1
+        price_range = (np.max(closes[-8:])-np.min(closes[-8:]))/np.mean(closes[-8:])*100
+        if vol_ratio<0.6 and price_range<3.0: return {'detected':True, 'reason':f'🌊 هدوء (حجم {vol_ratio*100:.0f}%)'}
         return {'detected':False}
     def _check_whale(self, volumes, closes):
-        if len(volumes)<10: return {'detected':False}
-        vol_ratio = volumes[-1]/np.mean(volumes[-15:]) if np.mean(volumes[-15:])>0 else 1
-        price_stability = (np.max(closes[-5:])-np.min(closes[-5:]))/np.mean(closes[-5:])*100
-        if vol_ratio>1.5 and price_stability<2.0: return {'detected':True, 'reason':f'🐋 حيتان ({vol_ratio:.1f}x)'}
+        if len(volumes)<8: return {'detected':False}
+        vol_ratio = volumes[-1]/np.mean(volumes[-12:]) if np.mean(volumes[-12:])>0 else 1
+        price_stability = (np.max(closes[-4:])-np.min(closes[-4:]))/np.mean(closes[-4:])*100
+        if vol_ratio>1.3 and price_stability<2.5: return {'detected':True, 'reason':f'🐋 حيتان ({vol_ratio:.1f}x)'}
         return {'detected':False}
     def _check_bollinger(self, closes):
-        if len(closes)<20: return {'detected':False}
-        recent, current = closes[-20:], closes[-1]
+        if len(closes)<15: return {'detected':False}
+        recent, current = closes[-15:], closes[-1]
         middle, std = np.mean(recent), np.std(recent)
         upper, lower = middle+2*std, middle-2*std
         bandwidth = (upper-lower)/middle*100
         price_position = (current-lower)/(upper-lower) if upper!=lower else 0.5
-        if bandwidth<6.0 and price_position<0.45: return {'detected':True, 'reason':f'🎯 بولنجر ({bandwidth:.1f}%)'}
+        if bandwidth<8.0 and price_position<0.5: return {'detected':True, 'reason':f'🎯 بولنجر ({bandwidth:.1f}%)'}
         return {'detected':False}
     def _check_divergence(self, closes):
-        if len(closes)<25: return {'detected':False}
-        rsi = self._calculate_rsi(closes[-25:])
-        if len(rsi)<15: return {'detected':False}
+        if len(closes)<20: return {'detected':False}
+        rsi = self._calculate_rsi(closes[-20:])
+        if len(rsi)<12: return {'detected':False}
         mid = len(closes)//2
         if np.min(closes[mid:])<np.min(closes[:mid]) and np.min(rsi[mid:])>np.min(rsi[:mid]): return {'detected':True, 'reason':'📈 تباعد إيجابي'}
         return {'detected':False}
     def _check_volume_break(self, volumes, closes):
-        if len(volumes)<5 or len(closes)<3: return {'detected':False}
-        vol_ratio = volumes[-1]/np.mean(volumes[-6:-1]) if np.mean(volumes[-6:-1])>0 else 1
-        price_change = (closes[-1]-closes[-3])/closes[-3]*100
-        if vol_ratio>2.0 and price_change>1.5: return {'detected':True, 'reason':f'💥 انفجار ({vol_ratio:.1f}x) +{price_change:.1f}%'}
+        if len(volumes)<4 or len(closes)<3: return {'detected':False}
+        vol_ratio = volumes[-1]/np.mean(volumes[-5:-1]) if np.mean(volumes[-5:-1])>0 else 1
+        price_change = (closes[-1]-closes[-2])/closes[-2]*100
+        if vol_ratio>1.8 and price_change>1.0: return {'detected':True, 'reason':f'💥 انفجار ({vol_ratio:.1f}x) +{price_change:.1f}%'}
         return {'detected':False}
     def _check_breakout(self, highs, closes):
-        if len(highs)<20: return {'detected':False}
-        if closes[-1] > np.max(highs[-20:])*0.98: return {'detected':True, 'reason':'🚀 قرب كسر المقاومة'}
+        if len(highs)<15: return {'detected':False}
+        if closes[-1] > np.max(highs[-15:])*0.98: return {'detected':True, 'reason':'🚀 قرب كسر المقاومة'}
         return {'detected':False}
     def _calculate_rsi(self, prices, period=14):
         if len(prices)<period+1: return np.array([50])
@@ -559,7 +553,7 @@ class OptimizedFirstStationDetector:
         return 100-(100/(1+rs))
 
 # =========================================================
-# نظام إدارة الصفقات
+# نظام إدارة الصفقات (مع تعديل حجم الصفقة)
 # =========================================================
 class OptimizedTrainRider:
     def __init__(self, logger: CSVLogger, learner: TradeLearner):
@@ -584,7 +578,7 @@ class OptimizedTrainRider:
         ohlcv_1m = await exchange.fetch_ohlcv(symbol, '1m', limit=20)
         pre_ign = self.pre_ignition.detect(np.array(ohlcv_1m))
         final_confidence = signal.confidence + extra_confidence + (5 if pre_ign['detected'] else 0)
-        entry_strategy = [0.4,0.35,0.25] if (pre_ign['entry_bonus'] and final_confidence>=70) else [0.33,0.33,0.34]
+        entry_strategy = [0.5, 0.5]  # دخول بمرحلتين فقط للسرعة
         first_entry = allocation * entry_strategy[0]
         self.available_capital -= first_entry
         trade = TradeInfo(symbol=symbol, signal=signal, entry_price=signal.entry_price, capital_allocated=allocation,
@@ -594,7 +588,6 @@ class OptimizedTrainRider:
         self.active_trades[symbol] = trade
         self.daily_trades += 1; self.total_trades += 1
         self.logger.log_trade({'type':'entry','symbol':symbol,'stage':1,'price':signal.entry_price,'amount':first_entry,'confidence':final_confidence,'pre_ignition':pre_ign['detected']})
-        await self._send_telegram(f"🚂 *ركوب القطار*\n{BOT_TAG}\n\n🪙 *{symbol}*\n💵 {signal.entry_price:.8f}\n💰 {first_entry:.2f}$ / {allocation:.0f}$\n📊 {final_confidence:.1f}% | {signal.pattern_type}")
         print(f"\n🚂 {symbol} @ {signal.entry_price:.8f} | {first_entry:.2f}$ | {final_confidence:.0f}%")
         return {'success': True}
 
@@ -605,7 +598,6 @@ class OptimizedTrainRider:
                          trailing_stop_price=signal.entry_price*0.97, rejection_reason=reason)
         self.virtual_trades[signal.symbol] = vt
         self.logger.log_virtual_trade(vt)
-        print(f"📊 صفقة افتراضية: {signal.symbol} ({reason})")
 
     async def update_trades(self, exchange):
         for symbol, trade in list(self.active_trades.items()):
@@ -616,21 +608,17 @@ class OptimizedTrainRider:
                 avg_entry = sum(p*a for p,a in zip(trade.entry_prices, trade.entry_amounts)) / sum(trade.entry_amounts)
                 pnl_pct = (price - avg_entry)/avg_entry*100
                 if trade.stage == 1:
-                    if pnl_pct >= 2.0 and trade.remaining > 0: await self._add_position(trade, price, 2, 0.35)
+                    if pnl_pct >= 2.0 and trade.remaining > 0:
+                        second_entry = trade.remaining
+                        trade.invested += second_entry; trade.remaining = 0; trade.stage = 2
+                        trade.entry_prices.append(price); trade.entry_amounts.append(second_entry)
+                        self.available_capital -= second_entry
+                        print(f"  ✅ {symbol}: مرحلة 2 @ {price:.8f}")
                     elif pnl_pct <= -2.0: await self._close_trade(symbol, price, pnl_pct, "وقف مبكر")
                 elif trade.stage == 2:
-                    if pnl_pct >= 4.0 and trade.remaining > 0: await self._add_position(trade, price, 3, trade.remaining/trade.capital_allocated)
-                    elif pnl_pct <= -1.5: await self._close_trade(symbol, price, pnl_pct, "وقف")
                     if pnl_pct >= 3.0: trade.trailing_stop = max(trade.trailing_stop, price*0.97)
-                elif trade.stage == 3:
-                    if pnl_pct >= 5.0: trade.trailing_stop = max(trade.trailing_stop, price*0.965)
-                    elif pnl_pct >= 3.0: trade.trailing_stop = max(trade.trailing_stop, price*0.97)
-                    for target in [6.0,9.0,12.0,15.0]:
-                        if pnl_pct >= target and target not in trade.take_profits:
-                            trade.take_profits.append(target)
-                            await self._send_telegram(f"💰 *+{target:.0f}%* - {symbol}")
                     if price <= trade.trailing_stop: await self._close_trade(symbol, price, pnl_pct, "وقف متحرك")
-                    elif pnl_pct >= 18.0: await self._close_trade(symbol, price, pnl_pct, "هدف نهائي")
+                    elif pnl_pct >= 10.0: await self._close_trade(symbol, price, pnl_pct, "هدف 10%")
             except Exception as e: print(f"⚠️ {symbol}: {e}")
 
     async def update_virtual_trades(self, exchange):
@@ -642,21 +630,13 @@ class OptimizedTrainRider:
                 vt.current_price = price
                 vt.highest_price = max(vt.highest_price, price)
                 vt.pnl_pct = (price - vt.entry_price)/vt.entry_price*100
-                if vt.pnl_pct >= 10.0:
-                    vt.status, vt.exit_price, vt.exit_time, vt.exit_reason = 'closed', price, datetime.now(), 'هدف 10%'
+                if vt.pnl_pct >= 8.0:
+                    vt.status, vt.exit_price, vt.exit_time, vt.exit_reason = 'closed', price, datetime.now(), 'هدف 8%'
                     self.logger.log_virtual_trade(vt)
                 elif vt.pnl_pct <= -3.0:
                     vt.status, vt.exit_price, vt.exit_time, vt.exit_reason = 'closed', price, datetime.now(), 'وقف خسارة'
                     self.logger.log_virtual_trade(vt)
             except: pass
-
-    async def _add_position(self, trade: TradeInfo, price: float, stage: int, ratio: float):
-        amount = min(trade.capital_allocated * ratio, trade.remaining)
-        trade.invested += amount; trade.remaining -= amount; trade.stage = stage
-        trade.entry_prices.append(price); trade.entry_amounts.append(amount)
-        self.available_capital -= amount
-        await self._send_telegram(f"✅ *مرحلة {stage}*\n{BOT_TAG}\n\n🪙 {trade.symbol}\n💵 {price:.8f}\n💰 +{amount:.2f}$")
-        print(f"  ✅ {trade.symbol}: مرحلة {stage} @ {price:.8f}")
 
     async def _close_trade(self, symbol: str, price: float, pnl: float, reason: str):
         trade = self.active_trades[symbol]
@@ -665,8 +645,6 @@ class OptimizedTrainRider:
         self.daily_pnl += pnl
         if pnl > 0: self.winning_trades += 1
         self.learner.record_trade(trade.signal, pnl)
-        win_rate = (self.winning_trades/self.total_trades*100) if self.total_trades else 0
-        await self._send_telegram(f"{'💰' if pnl>0 else '📉'} *صفقة مكتملة*\n{BOT_TAG}\n\n🪙 {symbol}\n📊 {pnl:+.2f}% ({pnl_usd:+.2f}$)\n🎯 {reason}\n💵 المتاح: {self.available_capital:.2f}$\n📈 النجاح: {win_rate:.0f}%")
         print(f"\n🏁 {symbol}: {pnl:+.2f}% | {reason} | متاح: {self.available_capital:.2f}$")
         self.logger.log_trade({'type':'exit','symbol':symbol,'exit_price':price,'pnl_pct':pnl,'pnl_usd':pnl_usd,'reason':reason})
         del self.active_trades[symbol]
@@ -679,7 +657,7 @@ class OptimizedTrainRider:
         except: pass
 
 # =========================================================
-# تطبيق Flask
+# تطبيق Flask (مع عرض عدد العملات الممسوحة)
 # =========================================================
 app = Flask(__name__)
 engine_instance = None
@@ -692,18 +670,17 @@ def dashboard():
     scan_stats = engine_instance.last_scan_stats
     exchange_status = engine_instance.exchange_status
     return render_template_string('''
-    <!DOCTYPE html><html dir="rtl"><head><title>لوحة التحكم</title><meta charset="utf-8"><meta http-equiv="refresh" content="30">
+    <!DOCTYPE html><html dir="rtl"><head><title>لوحة التحكم - وضع التحليل المكثف</title><meta charset="utf-8"><meta http-equiv="refresh" content="20">
     <style>body{font-family:Arial;background:#1a1a2e;color:#eee;margin:20px}.card{background:#16213e;border-radius:10px;padding:20px;margin:10px}.badge{padding:5px 10px;border-radius:20px}.success{background:#0f9d58}.warning{background:#f4b400}.danger{background:#d93025}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #2c3e50}th{background:#0f3460}a{color:#4285f4;margin:5px}.btn{background:#0f3460;color:white;padding:8px 16px;border-radius:5px;display:inline-block;margin:5px}</style></head><body>
-    <h1>🚂 نظام ركوب القطار</h1>
+    <h1>🚂 وضع التحليل المكثف (2000 عملة)</h1>
     <div style="display:flex;flex-wrap:wrap">
     <div class="card" style="flex:2"><h2>📊 حالة السوق</h2><p>النظام: <span class="badge {{'success' if market.regime=='trending_bullish' else 'warning' if market.regime=='ranging' else 'danger'}}">{{market.regime}}</span></p><p>السبب: {{market.reason}}</p><p>ADX: {{market.adx}} | BTC 1h: {{market.btc_change}}%</p><p>التداول: {{'✅' if market.can_trade else '❌'}}</p></div>
     <div class="card" style="flex:2"><h2>💰 حالة البوت</h2><p>الكلي: ${{"%.2f"|format(capital)}}</p><p>المتاح: ${{"%.2f"|format(available)}}</p><p>النشطة: {{active_count}}/{{max_concurrent}}</p><p>اليوم: {{daily_trades}}/{{max_daily}}</p><p>النجاح: {{"%.1f"|format(win_rate)}}% ({{wins}}/{{total}})</p></div>
     <div class="card" style="flex:1"><h2>🔍 آخر مسح</h2><p>⏱️ الوقت: {{scan_stats.time}}</p><p>📊 العملات: {{scan_stats.scanned}}</p><p>🎯 الإشارات: <span style="color:{{'#0f9d58' if scan_stats.signals>0 else '#aaa'}}">{{scan_stats.signals}}</span></p><p>⏳ المدة: {{scan_stats.duration}} ث</p></div>
-    <div class="card" style="flex:1"><h2>🔄 حالة المنصة</h2><p>الاتصال: <span class="badge {{'success' if exchange_status.connected else 'danger'}}">{{'✅ متصل' if exchange_status.connected else '❌ منفصل'}}</span></p>{% if exchange_status.last_success %}<p>آخر نجاح: {{exchange_status.last_success[:19]}}</p>{% endif %}{% if exchange_status.error %}<p>خطأ: <span style="color:red">{{exchange_status.error[:50]}}</span></p>{% endif %}</div>
+    <div class="card" style="flex:1"><h2>🔄 حالة المنصة</h2><p>الاتصال: <span class="badge {{'success' if exchange_status.connected else 'danger'}}">{{'✅ متصل' if exchange_status.connected else '❌ منفصل'}}</span></p>{% if exchange_status.last_success %}<p>آخر نجاح: {{exchange_status.last_success[:19]}}</p>{% endif %}</div>
     </div>
     <div class="card"><h2>📁 التحميل</h2><a href="/download/signals" class="btn">📊 الإشارات</a><a href="/download/trades" class="btn">📈 الصفقات</a><a href="/download/virtual" class="btn">🧪 الافتراضية</a><a href="/download/snapshots" class="btn">📸 اللقطات</a><a href="/download/errors" class="btn">⚠️ الأخطاء</a></div>
-    <div class="card"><h2>🔄 الصفقات النشطة</h2>{% if active_trades %}<table><tr><th>الرمز</th><th>الدخول</th><th>الحالي</th><th>الربح</th><th>المرحلة</th></tr>{% for t in active_trades %}<tr><td>{{t.symbol}}</td><td>{{"%.8f"|format(t.entry)}}</td><td>{{"%.8f"|format(t.current)}}</td><td style="color:{{'green' if t.pnl>0 else 'red'}}">{{"%+.2f"|format(t.pnl)}}%</td><td>{{t.stage}}/3</td></tr>{% endfor %}</table>{% else %}<p>لا توجد صفقات نشطة.</p>{% endif %}</div>
-    <div class="card"><h2>🧪 الصفقات الافتراضية</h2>{% if virtual_trades %}<table><tr><th>الرمز</th><th>الدخول</th><th>الحالي</th><th>الربح</th><th>سبب الرفض</th><th>الحالة</th></tr>{% for v in virtual_trades %}<tr><td>{{v.symbol}}</td><td>{{"%.8f"|format(v.entry)}}</td><td>{{"%.8f"|format(v.current)}}</td><td style="color:{{'green' if v.pnl>0 else 'red'}}">{{"%+.2f"|format(v.pnl)}}%</td><td>{{v.reason}}</td><td>{{v.status}}</td></tr>{% endfor %}</table>{% else %}<p>لا توجد صفقات افتراضية.</p>{% endif %}</div>
+    <div class="card"><h2>🔄 الصفقات النشطة ({{active_trades|length}})</h2>{% if active_trades %}<table><tr><th>الرمز</th><th>الدخول</th><th>الحالي</th><th>الربح</th><th>المرحلة</th></tr>{% for t in active_trades %}<tr><td>{{t.symbol}}</td><td>{{"%.8f"|format(t.entry)}}</td><td>{{"%.8f"|format(t.current)}}</td><td style="color:{{'green' if t.pnl>0 else 'red'}}">{{"%+.2f"|format(t.pnl)}}%</td><td>{{t.stage}}/2</td></tr>{% endfor %}</table>{% else %}<p>لا توجد صفقات نشطة.</p>{% endif %}</div>
     <p style="text-align:center">آخر تحديث: {{now}}</p></body></html>''',
     market={'regime': market.get('regime','-'), 'reason': market.get('reason','-'), 'adx': market.get('adx',0), 'btc_change': market.get('btc_change_1h',0), 'can_trade': market.get('can_trade',False)},
     capital=TOTAL_CAPITAL, available=rider.available_capital, active_count=len(rider.active_trades), max_concurrent=MAX_CONCURRENT_TRADES,
@@ -711,20 +688,7 @@ def dashboard():
     win_rate=(rider.winning_trades/rider.total_trades*100) if rider.total_trades>0 else 0, wins=rider.winning_trades, total=rider.total_trades,
     scan_stats=scan_stats, exchange_status=exchange_status,
     active_trades=[{'symbol':s,'entry':t.entry_price,'current':t.highest_price,'pnl':((t.highest_price-t.entry_price)/t.entry_price*100) if t.entry_price>0 else 0,'stage':t.stage} for s,t in rider.active_trades.items()],
-    virtual_trades=[{'symbol':s,'entry':v.entry_price,'current':v.current_price,'pnl':v.pnl_pct,'reason':v.rejection_reason,'status':v.status} for s,v in rider.virtual_trades.items()],
     now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-@app.route('/api/status')
-def api_status():
-    if engine_instance is None: return jsonify({'error':'Engine not ready'})
-    return jsonify({'capital':TOTAL_CAPITAL,'available':engine_instance.rider.available_capital,'active':len(engine_instance.rider.active_trades),'daily':engine_instance.rider.daily_trades,'win_rate':(engine_instance.rider.winning_trades/engine_instance.rider.total_trades*100) if engine_instance.rider.total_trades>0 else 0,'market':engine_instance.market_regime,'scan_stats':engine_instance.last_scan_stats,'exchange_status':engine_instance.exchange_status})
-
-@app.route('/download/<filetype>')
-def download_file(filetype):
-    files = {'signals':SIGNALS_FILE,'trades':TRADES_FILE,'virtual':VIRTUAL_TRADES_FILE,'snapshots':SNAPSHOT_FILE,'errors':ERRORS_FILE}
-    filepath = files.get(filetype)
-    if filepath and os.path.exists(filepath): return send_file(filepath, as_attachment=True)
-    return "File not found", 404
 
 # =========================================================
 # المحرك الرئيسي
@@ -746,9 +710,8 @@ class OptimizedFirstStationEngine:
     async def run(self):
         global engine_instance
         engine_instance = self
-        exchange = ccxt_async.gateio({'enableRateLimit': True, 'rateLimit': 100})
-        print("🚀 بدء تشغيل المحرك...")
-        await self.rider._send_telegram(f"🚀 *بدء نظام المحطة الأولى*\n{BOT_TAG}\n\n💰 {TOTAL_CAPITAL}$ | {MAX_TRADES_PER_DAY} صفقة/يوم | مسح {SCAN_SYMBOLS_LIMIT} عملة")
+        exchange = ccxt_async.gateio({'enableRateLimit': True, 'rateLimit': 80})  # زيادة rateLimit
+        print("🚀 بدء وضع التحليل المكثف - مسح 2000 عملة...")
         self.symbols_info = await self.detector.filter_symbols(exchange, limit=SCAN_SYMBOLS_LIMIT)
         try:
             while True:
@@ -770,10 +733,9 @@ class OptimizedFirstStationEngine:
                             if signal.confidence < self.market_regime['min_confidence']: continue
                             if self.learner.should_avoid_symbol(signal.symbol): continue
                             confirm = await self.quick_confirm.confirm(exchange, signal.symbol, signal)
-                            if not confirm['confirmed']: continue
                             self.logger.log_signal(signal)
                             res = await self.rider.board_train(signal, exchange, self.market_regime, confirm['extra_confidence'])
-                            if res.get('success'): entered += 1; await asyncio.sleep(1)
+                            if res.get('success'): entered += 1; await asyncio.sleep(0.5)
                         self.exchange_status = {'connected': True, 'last_success': datetime.now().isoformat(), 'error': None}
                     except Exception as e:
                         self.exchange_status = {'connected': False, 'last_success': self.exchange_status['last_success'], 'error': str(e)}
