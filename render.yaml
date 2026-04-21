@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: hybrid-trading-bot
     runtime: python
     region: frankfurt
@@ -12,24 +12,5 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: INITIAL_CAPITAL
-        value: "1000"
-      - key: MAX_CONCURRENT_TRADES
-        value: "3"
-      - key: SCAN_INTERVAL
-        value: "45"
-      - key: MIN_STATION_CONFIDENCE
-        value: "65"
-      - key: MIN_CONSENSUS_SCORE
-        value: "55"
-      - key: TZ
-        value: "UTC"
-      - key: GATEIO_API_KEY
-        sync: false
-      - key: GATEIO_SECRET
-        sync: false
-    
-    disk:
-      name: trading-logs
-      mountPath: /opt/render/project/src/trading_logs
-      sizeGB: 1
+      - key: PORT
+        value: "8080"
