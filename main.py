@@ -35,7 +35,7 @@ RSI_FAST_PERIOD = 5
 RSI_FAST_OVERSOLD = 30
 RSI_FAST_RECOVER = 45
 ATR_MULTIPLIER = 1.5
-MIN_EXPECTED_GAIN = 5.0   # أقل نسبة صعود متوقعة للدخول (5%)
+MIN_EXPECTED_GAIN = 3.0   # تم التعديل من 5 إلى 3
 
 # معاملات الارتباط
 CORRELATION_THRESHOLD = 0.7
@@ -49,7 +49,6 @@ LARGE_COINS = [
     'AAVE', 'MKR', 'COMP', 'SNX', 'CRV', '1INCH', 'SUSHI', 'CAKE', 'BAKE'
 ]
 
-# === إعدادات المسح الشامل ===
 BATCH_SIZE = 50
 TOTAL_SCAN_TARGET = 1500
 
@@ -64,7 +63,7 @@ class TrainSignal:
     rsi_slow: float
     vol_ratio: float
     atr: float
-    expected_gain: float          # النسبة المئوية المتوقعة للصعود
+    expected_gain: float
     reasons: list
     timeframe_confirmation: dict
 
@@ -81,7 +80,7 @@ class TradeInfo:
     entry_time: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 # =========================================================
-# 🚀 المحرك النهائي مع تحليل الهدف المتوقع
+# 🚀 المحرك النهائي
 # =========================================================
 class FinalHighWinRateEngine:
     def __init__(self):
@@ -168,47 +167,39 @@ class FinalHighWinRateEngine:
         low = df['l']
         volume = df['v']
 
-        # RSI سريع
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=RSI_FAST_PERIOD).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_FAST_PERIOD).mean()
         rs = gain / (loss + 1e-9)
         rsi_fast = 100 - (100 / (1 + rs)).iloc[-1]
 
-        # RSI بطيء
         delta14 = close.diff()
         gain14 = (delta14.where(delta14 > 0, 0)).rolling(window=14).mean()
         loss14 = (-delta14.where(delta14 < 0, 0)).rolling(window=14).mean()
         rs14 = gain14 / (loss14 + 1e-9)
         rsi_slow = 100 - (100 / (1 + rs14)).iloc[-1]
 
-        # MACD
         exp1 = close.ewm(span=12, adjust=False).mean()
         exp2 = close.ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
         macd_cross_up = (macd.iloc[-1] > signal.iloc[-1]) and (macd.iloc[-2] <= signal.iloc[-2])
 
-        # Bollinger
         sma20 = close.rolling(20).mean()
         std20 = close.rolling(20).std()
         upper_bb = sma20 + 2 * std20
         bb_breakout = close.iloc[-1] > upper_bb.iloc[-1] * (1 + MIN_BREAKOUT_PERCENT / 100)
-        bb_position = (close.iloc[-1] - sma20.iloc[-1]) / (std20.iloc[-1] + 1e-9)  # عدد الانحرافات المعيارية
+        bb_position = (close.iloc[-1] - sma20.iloc[-1]) / (std20.iloc[-1] + 1e-9)
 
-        # ATR
         tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
 
-        # حجم
         avg_volume = volume.iloc[-20:-1].mean()
         vol_ratio = volume.iloc[-1] / (avg_volume + 1e-9)
 
-        # EMA200
         ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1]
         above_ema200 = close.iloc[-1] > ema200
 
-        # الزخم (معدل التغير لـ 3 شمعات)
         momentum = (close.iloc[-1] / close.iloc[-4] - 1) * 100 if len(close) >= 4 else 0
 
         return {
@@ -225,35 +216,15 @@ class FinalHighWinRateEngine:
         }
 
     def calculate_expected_gain(self, ind5, ind15, ind1h, vol_ratio, bb_position):
-        """
-        حساب نسبة الصعود المتوقعة بناءً على:
-        - قوة الاختراق (bb_position): كلما زادت الانحرافات المعيارية، زاد الهدف.
-        - نسبة الحجم (vol_ratio): حجم أكبر يعني زخم أقوى.
-        - زخم السعر (momentum): سرعة التحرك.
-        - الاتجاه العام: قوة الترند على الإطار اليومي (هنا نكتفي بـ 1h).
-        """
-        # الأساس: 3% كحد أدنى للاختراق الجيد
         base_gain = 3.0
-        
-        # مكافأة اختراق Bollinger (كل 0.5 انحراف معياري يضيف 1%)
-        bb_bonus = max(0, (bb_position - 1.5)) * 2   # مثال: عند 2.5 انحراف معياري → +2%
-        
-        # مكافأة الحجم (كل 1 ضعف حجم يضيف 0.5%، بحد أقصى 4%)
+        bb_bonus = max(0, (bb_position - 1.5)) * 2
         vol_bonus = min(4.0, (vol_ratio - 2.0) * 0.8)
-        
-        # مكافأة الزخم (كل 1% تغير في 3 شمعات يضيف 0.5%)
         mom_bonus = max(0, ind5['momentum'] * 0.5)
-        
-        # مكافأة الترند القوي (إذا كان السعر بعيداً عن EMA200 بنسبة >3%)
+        trend_bonus = 0
         if ind1h['above_ema200']:
             ema_distance = (ind1h['close'] / ind1h.get('ema200', ind1h['close'])) - 1 if 'ema200' in ind1h else 0
             trend_bonus = min(2.0, max(0, ema_distance * 10))
-        else:
-            trend_bonus = 0
-        
         total_gain = base_gain + bb_bonus + vol_bonus + mom_bonus + trend_bonus
-        
-        # لا نتجاوز 15% تقديراً واقعياً
         return min(total_gain, 15.0)
 
     async def analyze_opportunity(self, ex, symbol):
@@ -277,23 +248,18 @@ class FinalHighWinRateEngine:
             return None
 
         reasons = []
-        
-        # 1. الاتجاه العام صاعد على الساعة
         if not ind1h["above_ema200"]:
             return None
         reasons.append("الاتجاه العام صاعد (1H فوق EMA200)")
 
-        # 2. حجم مفاجئ
         if ind5["vol_ratio"] < MIN_VOLUME_RATIO:
             return None
         reasons.append(f"حجم مفاجئ x{ind5['vol_ratio']:.1f}")
 
-        # 3. اختراق Bollinger العلوي
         if not ind5["bb_breakout"]:
             return None
         reasons.append("اختراق Bollinger العلوي")
 
-        # 4. انعكاس RSI السريع
         delta5 = df5['c'].diff()
         gain5 = (delta5.where(delta5 > 0, 0)).rolling(RSI_FAST_PERIOD).mean()
         loss5 = (-delta5.where(delta5 < 0, 0)).rolling(RSI_FAST_PERIOD).mean()
@@ -304,32 +270,25 @@ class FinalHighWinRateEngine:
             return None
         reasons.append(f"انعكاس RSI سريع ({rsi_fast_prev:.0f} → {rsi_fast_now:.0f})")
 
-        # 5. تقاطع MACD على 5m و 15m
         if not (ind5["macd_cross_up"] and ind15["macd_cross_up"]):
             return None
         reasons.append("تقاطع MACD صاعد على 5m و 15m")
 
-        # 6. RSI بطيء بين 40 و 70
         if not (40 < ind5["rsi_slow"] < 70):
             return None
         reasons.append(f"RSI بطيء {ind5['rsi_slow']:.0f}")
 
-        # 7. زيادة ATR
         atr_prev = df5['h'].rolling(14).apply(lambda x: x.max() - x.min(), raw=False).iloc[-2] if len(df5) > 15 else ind5["atr"]
         if ind5["atr"] <= atr_prev * 0.95:
             return None
         reasons.append("زيادة التقلب (ATR)")
 
-        # ---- حساب النسبة المتوقعة للصعود ----
         expected_gain = self.calculate_expected_gain(
             ind5, ind15, ind1h,
             vol_ratio=ind5["vol_ratio"],
             bb_position=ind5.get("bb_position", 1.5)
         )
-        
-        # إذا كان الهدف المتوقع أقل من 5%، نرفض الإشارة ولا نرسل إشعار
         if expected_gain < MIN_EXPECTED_GAIN:
-            # لا نرسل شيئاً، فقط نتجاهل
             return None
         reasons.append(f"🚀 الهدف المتوقع: {expected_gain:.1f}%")
 
@@ -345,10 +304,6 @@ class FinalHighWinRateEngine:
             timeframe_confirmation={"5m": "bullish", "15m": "bullish", "1h": "bullish"}
         )
         return signal
-
-    # باقي الدوال (monitor_trades, save, load, scan_batch, reentry_smart) كما هي دون تغيير...
-    # (للاختصار، سأكتبها مختصرة، لكن في الكود النهائي ستكون كاملة كما في النسخة السابقة)
-    # ... (يمكنك نسخ بقية الدوال من الرد السابق، فهي لم تتغير)
 
     async def monitor_trades(self, ex):
         panic = await self.check_btc_panic(ex)
@@ -507,7 +462,7 @@ app = Flask(__name__)
 def index():
     return render_template_string("""
     <body style="background:#020617; color:#f1f5f9; font-family:sans-serif; padding:20px;">
-        <h1 style="color:#38bdf8;">🔥 Empire Target Gain Filter (≥5%) 🔥</h1>
+        <h1 style="color:#38bdf8;">🔥 Empire Target Gain Filter (≥3%) 🔥</h1>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; margin:20px 0;">
             <div style="background:#1e293b; padding:20px; border-radius:12px;">
                 <small>الرصيد الورقي</small><br><strong style="font-size:1.8rem;">{{ "%.2f"|format(balance) }} USDT</strong>
@@ -543,7 +498,7 @@ def index():
     """, balance=engine.balance, active=engine.active_trades, panic=engine.panic_mode, history=engine.closed_trades)
 
 @app.route('/health')
-def health(): return "Empire Target Gain Filter Online", 200
+def health(): return "Empire Target Gain Filter (≥3%) Online", 200
 
 def keep_alive():
     while True:
@@ -557,7 +512,7 @@ def keep_alive():
 async def main_loop():
     ex = ccxt_async.gateio({'enableRateLimit': True})
     engine.load_all()
-    await engine.send_tg("🚀 *تشغيل الماسح الإمبراطوري - فلتر الهدف ≥5%* \n✅ استبعاد العملات الكبيرة\n✅ مسح 1500 عملة\n✅ الدخول فقط إذا كان الهدف المتوقع ≥5%")
+    await engine.send_tg("🚀 *تشغيل الماسح الإمبراطوري - فلتر الهدف ≥3%* \n✅ استبعاد العملات الكبيرة\n✅ مسح 1500 عملة\n✅ الدخول فقط إذا كان الهدف المتوقع ≥3%")
     await engine.refresh_symbol_list(ex)
     if not engine.all_usdt_symbols:
         await engine.send_tg("⚠️ لم يتم العثور على عملات صغيرة.")
