@@ -741,24 +741,37 @@ class OptimizedFirstStationEngine:
         self.scan_count = 0
         self.symbols_info = []
 
-    async def run(self):
+        async def run(self):
         global engine_instance
         engine_instance = self
-        exchange = ccxt_async.gateio({'enableRateLimit': True, 'rateLimit': 80})  # زيادة rateLimit
-        print("🚀 بدء وضع التحليل المكثف - مسح 2000 عملة...")
-        self.symbols_info = await self.detector.filter_symbols(exchange, limit=SCAN_SYMBOLS_LIMIT)
+        # ضبط سرعة الطلبات لضمان عدم الحظر
+        exchange = ccxt_async.gateio({'enableRateLimit': True, 'rateLimit': 100}) 
+        
+        print("🚀 بدء المحرك: وضع التحليل المكثف نشط")
+        
         try:
             while True:
                 self.scan_count += 1
                 scan_start = time.time()
+
+                # --- التغيير الجوهري: تحديث القائمة في كل دورة مسح ---
+                print(f"\n🔍 دورة #{self.scan_count} | جلب وتحليل {SCAN_SYMBOLS_LIMIT} عملة...")
+                self.symbols_info = await self.detector.filter_symbols(exchange, limit=SCAN_SYMBOLS_LIMIT)
+                # --------------------------------------------------
+
                 self.market_regime = await self.market_filter.analyze(exchange)
-                print(f"🔍 دورة #{self.scan_count} | {self.market_regime['reason']} | ADX: {self.market_regime['adx']}")
-                if self.rider.active_trades: await self.rider.update_trades(exchange)
+                
+                if self.rider.active_trades: 
+                    await self.rider.update_trades(exchange)
+                
                 await self.rider.update_virtual_trades(exchange)
+                
                 available_slots = MAX_CONCURRENT_TRADES - len(self.rider.active_trades)
                 signals = []
+                
                 if available_slots > 0 and self.market_regime['can_trade']:
                     try:
+                        # تحليل الدفعة بناءً على القائمة المحدثة توّاً
                         signals = await self.detector.scan_batch(exchange, self.symbols_info)
                         entered = 0
                         for signal in signals:
@@ -766,24 +779,42 @@ class OptimizedFirstStationEngine:
                             if not any(p in signal.pattern_type for p in self.market_regime['allowed_patterns']): continue
                             if signal.confidence < self.market_regime['min_confidence']: continue
                             if self.learner.should_avoid_symbol(signal.symbol): continue
+                            
                             confirm = await self.quick_confirm.confirm(exchange, signal.symbol, signal)
                             self.logger.log_signal(signal)
                             res = await self.rider.board_train(signal, exchange, self.market_regime, confirm['extra_confidence'])
-                            if res.get('success'): entered += 1; await asyncio.sleep(0.5)
+                            if res.get('success'): 
+                                entered += 1
+                                await asyncio.sleep(0.5)
+                                
                         self.exchange_status = {'connected': True, 'last_success': datetime.now().isoformat(), 'error': None}
                     except Exception as e:
+                        print(f"⚠️ خطأ في المسح: {e}")
                         self.exchange_status = {'connected': False, 'last_success': self.exchange_status['last_success'], 'error': str(e)}
+
                 scan_duration = time.time() - scan_start
-                self.last_scan_stats = {'scanned': len(self.symbols_info), 'signals': len(signals), 'time': datetime.now().strftime('%H:%M:%S'), 'duration': round(scan_duration,2)}
-                win_rate = (self.rider.winning_trades/self.rider.total_trades*100) if self.rider.total_trades>0 else 0
-                update_db_status(TOTAL_CAPITAL, self.rider.available_capital, len(self.rider.active_trades), self.rider.daily_trades, win_rate, self.market_regime.get('regime',''), self.market_regime.get('btc_change_1h',0))
+                self.last_scan_stats = {
+                    'scanned': len(self.symbols_info), 
+                    'signals': len(signals), 
+                    'time': datetime.now().strftime('%H:%M:%S'), 
+                    'duration': round(scan_duration, 2)
+                }
+                
+                # تحديث قاعدة البيانات والإحصائيات
+                win_rate = (self.rider.winning_trades/self.rider.total_trades*100) if self.rider.total_trades > 0 else 0
+                update_db_status(TOTAL_CAPITAL, self.rider.available_capital, len(self.rider.active_trades), 
+                                 self.rider.daily_trades, win_rate, self.market_regime.get('regime',''), 
+                                 self.market_regime.get('btc_change_1h',0))
+                
                 self.logger.flush()
-                print(f"💵 متاح: {self.rider.available_capital:.2f}$ | صفقات: {self.rider.daily_trades}/{MAX_TRADES_PER_DAY} | ⏱️ {scan_duration:.1f}ث")
+                print(f"💵 متاح: {self.rider.available_capital:.2f}$ | صفقات اليوم: {self.rider.daily_trades} | ⏱️ استغرق المسح: {scan_duration:.1f}ث")
+                
                 await asyncio.sleep(SCAN_INTERVAL)
         except KeyboardInterrupt:
-            print("\n⏹️ إيقاف...")
+            print("\n⏹️ تم إيقاف البوت يدوياً...")
         finally:
             await exchange.close()
+
 
 def start_flask():
     init_database()
