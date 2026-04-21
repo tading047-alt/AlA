@@ -36,14 +36,14 @@ BOT_TAG = "#تحليل_مكثف"
 # =========================================================
 # ⚡ إعدادات التحليل المكثف (للتجربة فقط)
 # =========================================================
-TOTAL_CAPITAL = 1000.0
-MAX_TRADES_PER_DAY = 50          # فتح حتى 50 صفقة يومياً
-CAPITAL_PER_TRADE = 50.0         # 50$ لكل صفقة (لتوزيع المخاطر)
-MAX_CONCURRENT_TRADES = 15       # 15 صفقة متزامنة
-SCAN_INTERVAL = 30               # مسح كل 30 ثانية
+TOTAL_CAPITAL = 2000.0
+MAX_TRADES_PER_DAY = 200         # فتح حتى 50 صفقة يومياً
+CAPITAL_PER_TRADE = 10.0         # 50$ لكل صفقة (لتوزيع المخاطر)
+MAX_CONCURRENT_TRADES = 50      # 15 صفقة متزامنة
+SCAN_INTERVAL = 45              # مسح كل 30 ثانية
 MIN_CONFIDENCE = 20          # قبول إشارات أضعف
 SCAN_BATCH_SIZE = 100            # معالجة 100 عملة دفعة واحدة
-SCAN_SYMBOLS_LIMIT = 1000    # مسح 2000 عملة بعد الفلترة الأولية
+SCAN_SYMBOLS_LIMIT = 2000    # مسح 2000 عملة بعد الفلترة الأولية
 
 # =========================================================
 # إعدادات الملفات وقاعدة البيانات
@@ -737,9 +737,8 @@ class OptimizedFirstStationDetector:
             'divergence': {'name': '📈 تباعد', 'weight': 40},
             'volume': {'name': '💥 انفجار', 'weight': 45}
         }
-
-    async def filter_symbols(self, exchange, limit: int = SCAN_SYMBOLS_LIMIT) -> List[dict]:
-        """فلتر أولي سريع لجلب العملات النشطة فقط"""
+    async def filter_symbols(self, exchange, limit: int = 2000) -> List[dict]:
+        """فلتر ذكي لجلب 2000 عملة مع استبعاد العملات الميتة لتوفير جهد السيرفر"""
         try:
             tickers = await exchange.fetch_tickers()
             promising = []
@@ -747,24 +746,26 @@ class OptimizedFirstStationDetector:
                 if not symbol.endswith('/USDT'): continue
                 
                 volume = ticker.get('quoteVolume', 0)
-                if volume < 8000: continue # سيولة معقولة للاكتشاف المكثف
+                # استبعاد العملات التي سيولتها أقل من 1500$ (غير صالحة للدراسة)
+                if volume < 1500: continue 
                 
-                price = ticker.get('last', 0)
-                bid, ask = ticker.get('bid', 0), ticker.get('ask', 0)
-                spread = ((ask - bid) / bid * 100) if bid and bid > 0 else 0
-                
-                if spread > 1.8: continue 
+                # استبعاد العملات التي لم يتغير سعرها نهائياً (0%) في 24 ساعة
+                change = ticker.get('percentage', 0)
+                if abs(change) < 0.01: continue 
                 
                 promising.append({
-                    'symbol': symbol, 'volume': volume, 'price': price, 
-                    'change': ticker.get('percentage', 0), 'spread': spread
+                    'symbol': symbol, 'volume': volume, 
+                    'price': ticker.get('last', 0), 
+                    'change': change
                 })
             
+            # ترتيب حسب السيولة وجلب حتى 2000 عملة
             promising.sort(key=lambda x: x['volume'], reverse=True)
             return promising[:limit]
         except Exception as e:
-            print(f"❌ خطأ تحديث القائمة: {e}")
+            print(f"❌ خطأ الفلترة: {e}")
             return []
+
 
     async def scan_batch(self, exchange, symbols_info: List[dict]) -> List[StationSignal]:
         """النسخة المحسنة: تحليل أعمق لـ 150 عملة مع احترام الـ Rate Limit"""
@@ -818,60 +819,73 @@ class OptimizedFirstStationDetector:
         except Exception as e:
             print(f"❌ خطأ في جلب التيكرز: {e}")
             return []
-
     async def scan_batch(self, exchange, symbols_info: List[dict]) -> List[StationSignal]:
-        """المسح الذكي لـ 150 عملة لضمان الاكتشاف وعدم الحظر"""
+        """مسح شامل وهادئ لـ 2000 عملة لحماية السيرفر والـ API"""
         all_signals = []
-        top_candidates = symbols_info[:150]
-        total = len(top_candidates)
-        batch_size = 30 
+        total = len(symbols_info)
+        batch_size = 35  # حجم دفعة معتدل للسيرفر
         
         for i in range(0, total, batch_size):
-            batch = top_candidates[i:i+batch_size]
+            batch = symbols_info[i:i+batch_size]
             tasks = [self._analyze_single(exchange, info) for info in batch]
+            
+            # تنفيذ الدفعة الحالية بالتوازي
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             for result in results:
                 if isinstance(result, StationSignal): 
                     all_signals.append(result)
             
-            print(f"  📊 تم فحص {min(i + batch_size, total)}/{total} عملة...")
-            await asyncio.sleep(0.8) # مهلة ضرورية للـ API
+            # أهم تعديل: انتظار 1.5 ثانية بين كل دفعة (ضروري جداً عند مسح 2000 عملة)
+            await asyncio.sleep(1.5) 
             
+            if i % 140 == 0:
+                print(f"📡 رادار الدراسة: تم تحليل {i}/{total} عملة...")
+        
+        # ترتيب النتائج حسب قوة الإشارة
         all_signals.sort(key=lambda x: x.confidence, reverse=True)
         return all_signals
 
     async def _analyze_single(self, exchange, info: dict) -> Optional[StationSignal]:
+        """تحليل فني متوازن لجمع عينة دراسة كبيرة بجودة معقولة"""
         symbol = info['symbol']
         try:
+            # جلب شموع الـ 5 دقائق (35 شمعة كافية للدراسة)
             ohlcv = await exchange.fetch_ohlcv(symbol, '5m', limit=35)
-            if len(ohlcv) < 15: return None
+            if len(ohlcv) < 20: return None
+            
             data = np.array(ohlcv)
             closes, volumes = data[:,4], data[:,5]
             
             total_confidence = 0
             all_reasons = []
 
-            # تحليل الحجم المفاجئ
-            vol_ratio = volumes[-1] / np.mean(volumes[-10:-1]) if np.mean(volumes[-10:-1]) > 0 else 1
-            if vol_ratio > 1.6:
-                total_confidence += 30; all_reasons.append(f"⚡ حجم {vol_ratio:.1f}x")
+            # تحليل الحجم (نقطة دخول سهلة للدراسة)
+            vol_ratio = volumes[-1] / np.mean(volumes[-15:-1]) if np.mean(volumes[-15:-1]) > 0 else 1
+            if vol_ratio > 1.3:
+                total_confidence += 20; all_reasons.append(f"📊 حجم {vol_ratio:.1f}x")
 
             # تحليل السعر
             price_change = (closes[-1] - closes[-2]) / closes[-2] * 100
-            if price_change > 0.6:
-                total_confidence += 20; all_reasons.append(f"📈 صعود {price_change:.1f}%")
+            if price_change > 0.4:
+                total_confidence += 15; all_reasons.append(f"📈 صعود {price_change:.1f}%")
 
+            # عتبة الثقة للدراسة: 25% (تسمح بفتح صفقات كثيرة)
             if total_confidence >= 25:
                 return StationSignal(
-                    symbol=symbol, pattern_type="📊 تحليل مكثف", 
+                    symbol=symbol, 
+                    pattern_type="🔬 عينة دراسة", 
                     confidence=min(100, total_confidence),
-                    entry_price=info['price'], expected_move=5.0, 
-                    time_to_explosion=100, volume_24h=info['volume'], 
-                    price_change_24h=info['change'], reasons=all_reasons
+                    entry_price=info['price'], 
+                    expected_move=5.0, 
+                    time_to_explosion=100, 
+                    volume_24h=info['volume'], 
+                    price_change_24h=info['change'], 
+                    reasons=all_reasons
                 )
         except: pass
         return None
+
 
 # =========================================================
 # 🚂 المحرك الرئيسي (Engine) - هذا هو الجزء الذي كان ينقصك
