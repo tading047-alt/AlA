@@ -41,7 +41,7 @@ MAX_TRADES_PER_DAY = 50          # فتح حتى 50 صفقة يومياً
 CAPITAL_PER_TRADE = 50.0         # 50$ لكل صفقة (لتوزيع المخاطر)
 MAX_CONCURRENT_TRADES = 15       # 15 صفقة متزامنة
 SCAN_INTERVAL = 30               # مسح كل 30 ثانية
-MIN_CONFIDENCE = 45              # قبول إشارات أضعف
+MIN_CONFIDENCE = 30             # قبول إشارات أضعف
 SCAN_BATCH_SIZE = 100            # معالجة 100 عملة دفعة واحدة
 SCAN_SYMBOLS_LIMIT = 2000        # مسح 2000 عملة بعد الفلترة الأولية
 
