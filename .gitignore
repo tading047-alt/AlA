@@ -1,1 +1,29 @@
 
+# ملفات Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# البيئة الافتراضية
+venv/
+env/
+.venv/
+
+# ملفات السجلات وقاعدة البيانات
+trading_logs/
+*.db
+*.sqlite3
+
+# ملفات البيئة (أسرار)
+.env
+*.env
+
+# ملفات النظام
+.DS_Store
+Thumbs.db
+
+# ملفات IDE
+.vscode/
+.idea/
