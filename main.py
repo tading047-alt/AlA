@@ -999,6 +999,7 @@ class OptimizedFirstStationEngine:
         print("🚀 بدء تشغيل المحرك...")
         self.symbols_info = await self.detector.filter_symbols(exchange, limit=400)
         try:
+            await self.rider._send_telegram(f"🚀 *بدء نظام المحطة الأولى*\n{BOT_TAG}\n\n💰 رأس المال: {TOTAL_CAPITAL}$\n📊 أقصى صفقات يومية: {MAX_TRADES_PER_DAY}")
             while True:
                 self.scan_count += 1
                 self.market_regime = await self.market_filter.analyze(exchange)
