@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+9#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 🚂 نظام ركوب القطار - وضع التحليل المكثف (2000 عملة)
@@ -960,17 +960,30 @@ async def main():
     # تشغيل المحرك
     engine = OptimizedFirstStationEngine()
     await engine.run()
+# 1. تعريف الدالة الأساسية كـ async
+async def main():
+    try:
+        # تشغيل واجهة الويب (Flask) في خيط منفصل لتجنب تعليق البوت
+        flask_thread = threading.Thread(target=start_flask, daemon=True)
+        flask_thread.start()
+        print("🌐 واجهة الويب تعمل على http://0.0.0.0:8080")
 
+        # تهيئة المحرك الرئيسي
+        engine = OptimizedFirstStationEngine()
+        
+        # تشغيل المحرك (هنا await مسموح بها لأننا داخل async def)
+        await engine.run()
+        
+    except Exception as e:
+        print(f"❌ خطأ غير متوقع في المحرك: {e}")
+
+# 2. نقطة الدخول الحقيقية للبرنامج
 if __name__ == "__main__":
     try:
+        # استخدام asyncio لتشغيل الدالة الأساسية
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n⏹️ تم إيقاف النظام.")
+        print("\n⏹️ تم إيقاف البوت بواسطة المستخدم.")
+    except Exception as e:
+        print(f"🚨 فشل تشغيل النظام: {e}")
 
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
-    engine = OptimizedFirstStationEngine()
-    await engine.run()
-
-if __name__ == "__main__":
-    asyncio.run(main())
