@@ -428,31 +428,65 @@ class OptimizedFirstStationDetector:
             'divergence': {'name': '📈 تباعد', 'weight': 30},
             'volume': {'name': '💥 انفجار', 'weight': 30}
         }
-
     async def filter_symbols(self, exchange, limit: int = SCAN_SYMBOLS_LIMIT) -> List[dict]:
-        print(f"📊 جلب العملات (الهدف {limit} عملة)...")
+        """تعديل: جلب حي للعملات في كل دورة لتجنب القائمة الميتة"""
         try:
             tickers = await exchange.fetch_tickers()
             promising = []
             for symbol, ticker in tickers.items():
                 if not symbol.endswith('/USDT'): continue
+                
+                # توسيع الفلاتر للسماح بدخول صفقات أكثر
                 volume = ticker.get('quoteVolume', 0)
-                if volume < 20000: continue  # خفض الحد إلى 20k
+                if volume < 10000: continue # خفضنا الحد لـ 10 آلاف دولار
+                
                 change = ticker.get('percentage', 0)
-                if change > 40 or change < -30: continue  # توسيع النطاق
+                # استبعاد العملات المنهارة جداً أو المنفجرة فعلياً
+                if change > 50 or change < -20: continue 
+                
                 price = ticker.get('last', 0)
-                if price < 0.0000001: continue  # خفض حد السعر
-                bid, ask = ticker.get('bid',0), ticker.get('ask',0)
-                spread = ((ask-bid)/bid*100) if bid>0 else 0
-                if spread > 1.0: continue  # توسيع حد السبريد
-                promising.append({'symbol': symbol, 'volume': volume, 'price': price, 'change': change, 'spread': spread})
+                bid, ask = ticker.get('bid', 0), ticker.get('ask', 0)
+                spread = ((ask - bid) / bid * 100) if bid and bid > 0 else 0
+                
+                if spread > 1.5: continue # رفعنا حد السبريد قليلاً
+                
+                promising.append({
+                    'symbol': symbol, 
+                    'volume': volume, 
+                    'price': price, 
+                    'change': change, 
+                    'spread': spread
+                })
+            
+            # ترتيب حسب العملات الأكثر نشاطاً حالياً
             promising.sort(key=lambda x: x['volume'], reverse=True)
-            selected = promising[:limit]
-            print(f"✅ تم اختيار {len(selected)} عملة")
-            return selected
+            return promising[:limit]
         except Exception as e:
-            print(f"❌ فلترة: {e}")
+            print(f"❌ خطأ في تحديث القائمة: {e}")
             return []
+
+    async def scan_batch(self, exchange, symbols_info: List[dict]) -> List[StationSignal]:
+        """تعديل: نظام القمع الذكي لمنع حظر الـ IP"""
+        all_signals = []
+        # نأخذ أعلى 200 عملة فقط للتحليل المعمق (OHLCV) لتجنب الـ Rate Limit
+        # الـ 1800 الباقية تم فحصها سعرياً في الخطوة السابقة
+        top_candidates = symbols_info[:200] 
+        
+        total = len(top_candidates)
+        for i in range(0, total, SCAN_BATCH_SIZE):
+            batch = top_candidates[i:i+SCAN_BATCH_SIZE]
+            tasks = [self._analyze_single(exchange, info) for info in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, StationSignal): 
+                    all_signals.append(result)
+            
+            await asyncio.sleep(0.5) # مهلة بسيطة لاحترام الـ API
+            
+        all_signals.sort(key=lambda x: x.confidence, reverse=True)
+        return all_signals
+
 
     async def scan_batch(self, exchange, symbols_info: List[dict]) -> List[StationSignal]:
         all_signals, total = [], len(symbols_info)
