@@ -727,93 +727,107 @@ def dashboard():
 # =========================================================
 # المحرك الرئيسي
 # =========================================================
-class OptimizedFirstStationEngine:
-    def __init__(self):
-        self.logger = CSVLogger()
-        self.learner = TradeLearner()
-        self.market_filter = MarketRegimeFilter()
-        self.quick_confirm = QuickConfirmationFilter()
-        self.detector = OptimizedFirstStationDetector(self.learner)
-        self.rider = OptimizedTrainRider(self.logger, self.learner)
-        self.market_regime = {}
-        self.last_scan_stats = {'scanned':0, 'signals':0, 'time':'-', 'duration':0}
-        self.exchange_status = {'connected': False, 'last_success': None, 'error': None}
-        self.scan_count = 0
-        self.symbols_info = []
+class OptimizedFirstStationDetector:
+    def __init__(self, learner: TradeLearner):
+        self.learner = learner
+        self.base_patterns = {
+            'calm': {'name': '🌊 هدوء', 'weight': 40},
+            'whale': {'name': '🐋 حيتان', 'weight': 45},
+            'bollinger': {'name': '🎯 بولنجر', 'weight': 40},
+            'divergence': {'name': '📈 تباعد', 'weight': 40},
+            'volume': {'name': '💥 انفجار', 'weight': 45}
+        }
 
-    async def run(self):
-        global engine_instance
-        engine_instance = self
-        # ضبط سرعة الطلبات لضمان عدم الحظر
-        exchange = ccxt_async.gateio({'enableRateLimit': True, 'rateLimit': 100}) 
-        
-        print("🚀 بدء المحرك: وضع التحليل المكثف نشط")
-        
+    async def filter_symbols(self, exchange, limit: int = SCAN_SYMBOLS_LIMIT) -> List[dict]:
+        """فلتر أولي سريع لجلب العملات النشطة فقط"""
         try:
-            while True:
-                self.scan_count += 1
-                scan_start = time.time()
+            tickers = await exchange.fetch_tickers()
+            promising = []
+            for symbol, ticker in tickers.items():
+                if not symbol.endswith('/USDT'): continue
+                
+                volume = ticker.get('quoteVolume', 0)
+                if volume < 8000: continue # سيولة معقولة للاكتشاف المكثف
+                
+                price = ticker.get('last', 0)
+                bid, ask = ticker.get('bid', 0), ticker.get('ask', 0)
+                spread = ((ask - bid) / bid * 100) if bid and bid > 0 else 0
+                
+                if spread > 1.8: continue 
+                
+                promising.append({
+                    'symbol': symbol, 'volume': volume, 'price': price, 
+                    'change': ticker.get('percentage', 0), 'spread': spread
+                })
+            
+            promising.sort(key=lambda x: x['volume'], reverse=True)
+            return promising[:limit]
+        except Exception as e:
+            print(f"❌ خطأ تحديث القائمة: {e}")
+            return []
 
-                # --- التغيير الجوهري: تحديث القائمة في كل دورة مسح ---
-                print(f"\n🔍 دورة #{self.scan_count} | جلب وتحليل {SCAN_SYMBOLS_LIMIT} عملة...")
-                self.symbols_info = await self.detector.filter_symbols(exchange, limit=SCAN_SYMBOLS_LIMIT)
-                # --------------------------------------------------
+    async def scan_batch(self, exchange, symbols_info: List[dict]) -> List[StationSignal]:
+        """النسخة المحسنة: تحليل أعمق لـ 150 عملة مع احترام الـ Rate Limit"""
+        all_signals = []
+        # نركز على أهم 150 عملة لضمان سرعة الاستجابة وعدم الحظر
+        top_candidates = symbols_info[:150] 
+        total = len(top_candidates)
+        batch_size = 25 # معالجة 25 عملة في كل دفعة
+        
+        for i in range(0, total, batch_size):
+            batch = top_candidates[i:i+batch_size]
+            tasks = [self._analyze_single(exchange, info) for info in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, StationSignal): 
+                    all_signals.append(result)
+            
+            print(f"  📊 تم فحص {min(i + batch_size, total)}/{total} عملة...")
+            await asyncio.sleep(0.7) # وقت انتظار كافٍ للمنصة
+            
+        all_signals.sort(key=lambda x: x.confidence, reverse=True)
+        return all_signals
 
-                self.market_regime = await self.market_filter.analyze(exchange)
-                
-                if self.rider.active_trades: 
-                    await self.rider.update_trades(exchange)
-                
-                await self.rider.update_virtual_trades(exchange)
-                
-                available_slots = MAX_CONCURRENT_TRADES - len(self.rider.active_trades)
-                signals = []
-                
-                if available_slots > 0 and self.market_regime['can_trade']:
-                    try:
-                        # تحليل الدفعة بناءً على القائمة المحدثة توّاً
-                        signals = await self.detector.scan_batch(exchange, self.symbols_info)
-                        entered = 0
-                        for signal in signals:
-                            if entered >= available_slots: break
-                            if not any(p in signal.pattern_type for p in self.market_regime['allowed_patterns']): continue
-                            if signal.confidence < self.market_regime['min_confidence']: continue
-                            if self.learner.should_avoid_symbol(signal.symbol): continue
-                            
-                            confirm = await self.quick_confirm.confirm(exchange, signal.symbol, signal)
-                            self.logger.log_signal(signal)
-                            res = await self.rider.board_train(signal, exchange, self.market_regime, confirm['extra_confidence'])
-                            if res.get('success'): 
-                                entered += 1
-                                await asyncio.sleep(0.5)
-                                
-                        self.exchange_status = {'connected': True, 'last_success': datetime.now().isoformat(), 'error': None}
-                    except Exception as e:
-                        print(f"⚠️ خطأ في المسح: {e}")
-                        self.exchange_status = {'connected': False, 'last_success': self.exchange_status['last_success'], 'error': str(e)}
+    async def _analyze_single(self, exchange, info: dict) -> Optional[StationSignal]:
+        """تحليل فني مخفف لاكتشاف الإشارات المبكرة"""
+        symbol = info['symbol']
+        try:
+            ohlcv = await exchange.fetch_ohlcv(symbol, '5m', limit=35)
+            if len(ohlcv) < 15: return None
+            data = np.array(ohlcv)
+            closes, volumes, highs = data[:,4], data[:,5], data[:,2]
+            current_price = info['price']
+            
+            detected, total_confidence, all_reasons = [], 0, []
+            
+            # فحص الأنماط (بأوزان مخففة)
+            if self._check_calm(volumes, closes)['detected']: 
+                detected.append('calm'); total_confidence += 35
+            if self._check_whale(volumes, closes)['detected']: 
+                detected.append('whale'); total_confidence += 40
+            if self._check_bollinger(closes)['detected']: 
+                detected.append('bollinger'); total_confidence += 35
+            
+            # كسر السعر أو الحجم المفاجئ
+            if volumes[-1] > np.mean(volumes[-10:-1]) * 1.5:
+                total_confidence += 15; all_reasons.append("⚡ حجم مفاجئ")
 
-                scan_duration = time.time() - scan_start
-                self.last_scan_stats = {
-                    'scanned': len(self.symbols_info), 
-                    'signals': len(signals), 
-                    'time': datetime.now().strftime('%H:%M:%S'), 
-                    'duration': round(scan_duration, 2)
-                }
-                
-                # تحديث قاعدة البيانات والإحصائيات
-                win_rate = (self.rider.winning_trades/self.rider.total_trades*100) if self.rider.total_trades > 0 else 0
-                update_db_status(TOTAL_CAPITAL, self.rider.available_capital, len(self.rider.active_trades), 
-                                 self.rider.daily_trades, win_rate, self.market_regime.get('regime',''), 
-                                 self.market_regime.get('btc_change_1h',0))
-                
-                self.logger.flush()
-                print(f"💵 متاح: {self.rider.available_capital:.2f}$ | صفقات اليوم: {self.rider.daily_trades} | ⏱️ استغرق المسح: {scan_duration:.1f}ث")
-                
-                await asyncio.sleep(SCAN_INTERVAL)
-        except KeyboardInterrupt:
-            print("\n⏹️ تم إيقاف البوت يدوياً...")
-        finally:
-            await exchange.close()
+            # الحد الأدنى للثقة للاكتشاف المكثف هو 25%
+            if total_confidence >= 25:
+                pattern_type = "🔥 اشتعال" if len(detected) >= 2 else "📊 تجميع نشط"
+                return StationSignal(
+                    symbol=symbol, pattern_type=pattern_type, 
+                    confidence=min(100, total_confidence),
+                    entry_price=current_price, expected_move=6.0, 
+                    time_to_explosion=90, volume_24h=info['volume'], 
+                    price_change_24h=info['change'], reasons=all_reasons
+                )
+        except: pass
+        return None
+
+    # (أبقِ على دوال _check_calm و _check_whale وغيرها كما هي)
+
 
 
 def start_flask():
