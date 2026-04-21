@@ -19,7 +19,7 @@ TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
 TELEGRAM_CHAT_ID = "5067771509"
 
 LOG_DIR = "/tmp/trading_logs"
-DB_FILE = os.path.join(LOG_DIR, "empire_final_v8.db")
+DB_FILE = os.path.join(LOG_DIR, "empire_final_v8_1.db")
 REAL_CSV = os.path.join(LOG_DIR, "trading_history.csv")
 MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -106,18 +106,16 @@ class ImperialMasterEngine:
             ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=50)
             df_15 = pd.DataFrame(ohlcv_15, columns=['t','o','h','l','c','v'])
             ema_50_15 = df_15['c'].ewm(span=50).mean().iloc[-1]
-            if df_15['c'].iloc[-1] < ema_50_15: return None # تجاهل لو الاتجاه هابط
+            if df_15['c'].iloc[-1] < ema_50_15: return None 
 
             # 2. تحليل فريم الدخول (5 دقائق) - استراتيجية BB + RSI + Volume
             ohlcv_5 = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=50)
             df_5 = pd.DataFrame(ohlcv_5, columns=['t','o','h','l','c','v'])
             
-            # بولنجر
             sma = df_5['c'].rolling(20).mean()
             std = df_5['c'].rolling(20).std()
             upper_bb = (sma + 2*std).iloc[-1]
             
-            # RSI
             delta = df_5['c'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -126,7 +124,6 @@ class ImperialMasterEngine:
             last_c = df_5['c'].iloc[-1]
             vol_avg = df_5['v'].rolling(10).mean().iloc[-2]
 
-            # الشروط المدمجة
             is_breakout = last_c > upper_bb
             is_momentum = 55 < rsi.iloc[-1] < 75
             is_volume = df_5['v'].iloc[-1] > vol_avg * 2
@@ -137,17 +134,112 @@ class ImperialMasterEngine:
         except: return None
 
 # =========================================================
-# 🌐 واجهة الويب والتحميل
+# 🌐 واجهة الويب والتحميل (المصححة)
 # =========================================================
 app = Flask(__name__)
 engine = ImperialMasterEngine()
 
 @app.route('/')
 def dashboard():
-    equity = engine.balance + sum([t.invested for t in engine.active_trades.values()])
-    html = """
+    active_inv = sum([t.invested for t in engine.active_trades.values()])
+    equity = engine.balance + active_inv
+    v_count = len(engine.virtual_trades)
+    
+    html_template = """
     <html dir="rtl"><head><meta charset="UTF-8"><title>Empire V8 Final</title>
     <style>
         body { background: #020617; color: white; font-family: sans-serif; padding: 20px; }
         .grid { display: flex; gap: 15px; justify-content: center; margin-bottom: 20px; }
-        .
+        .card { background: #1e293b; padding: 20px; border-radius: 10px; border-bottom: 4px solid #38bdf8; min-width: 200px; text-align: center; }
+        .btn { background: #38bdf8; color: #020617; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 10px; display: inline-block; }
+        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 10px; overflow: hidden; margin-top: 20px; }
+        th, td { padding: 12px; border-bottom: 1px solid #334155; text-align: center; }
+        .profit { color: #4ade80; font-weight: bold; } .virtual { color: #fbbf24; }
+    </style></head><body>
+        <h1 style="color:#38bdf8; text-align:center;">🛡️ المحرك الإمبراطوري النهائي (V8.1)</h1>
+        <div class="grid">
+            <div class="card"><h3>إجمالي المحفظة</h3><p class="profit" style="font-size:1.5rem;">{{ "%.2f"|format(equity) }} USDT</p></div>
+            <div class="card"><h3>السيولة المتاحة</h3><p>{{ "%.2f"|format(balance) }}</p></div>
+            <div class="card"><h3>الفرص المراقبة</h3><p class="virtual">{{ v_count }}</p></div>
+        </div>
+        <div style="text-align:center;">
+            <a href="/dl_real" class="btn">📥 تحميل سجل الأرباح</a>
+            <a href="/dl_missed" class="btn" style="background:#fbbf24;">📥 تحميل سجل التحليل</a>
+        </div>
+        
+        <h2>🟢 صفقات حقيقية ({{ active|length }}/5)</h2>
+        <table>
+            <tr style="background:#334155;"><th>العملة</th><th>المبلغ المستثمر</th><th>الربح العائم</th><th>الحالة</th></tr>
+            {% for s, t in active.items() %}
+            <tr><td><b>{{ s }}</b></td><td>{{ "%.2f"|format(t.invested) }}</td>
+            <td class="profit">{{ "%.2f"|format(((t.highest_price - t.entry_price)/t.entry_price)*100) }}%</td>
+            <td>{{ "🛡️ مؤمنة" if t.is_secured else "⚡ نشطة" }}</td></tr>
+            {% endfor %}
+        </table>
+
+        <h2 style="color:#fbbf24;">🟡 الفرص الضائعة (تحت المراقبة)</h2>
+        <table>
+            <tr style="background:#334155;"><th>العملة</th><th>سعر الاكتشاف</th><th>الربح الافتراضي</th><th>الاستراتيجية</th></tr>
+            {% for s, t in virtual.items() %}
+            <tr><td>{{ s }}</td><td>{{ t.entry_price }}</td><td class="virtual">{{ "%.2f"|format(((t.highest_price - t.entry_price)/t.entry_price)*100) }}%</td><td>{{ t.signal.strategy_name }}</td></tr>
+            {% endfor %}
+        </table>
+    </body></html>
+    """
+    return render_template_string(html_template, balance=engine.balance, equity=equity, active=engine.active_trades, virtual=engine.virtual_trades, v_count=v_count)
+
+@app.route('/dl_real')
+def dl_r(): return send_file(REAL_CSV, as_attachment=True)
+
+@app.route('/dl_missed')
+def dl_m(): return send_file(MISSED_CSV, as_attachment=True)
+
+# =========================================================
+# 🔄 محرك المعالجة والتلجرام
+# =========================================================
+async def main_loop():
+    ex = ccxt_async.gateio({'enableRateLimit': True})
+    markets = await ex.fetch_markets()
+    symbols = [m['symbol'] for m in markets if m['symbol'].endswith('/USDT') and m['active']]
+    
+    await engine.send_tg("🚀 *تم إطلاق النسخة V8.1 المصححة*\n- نظام الفريمات المزدوجة مفعل\n- تتبع الفرص الضائعة مفعل\n- إدارة المحفظة 20% مفعله")
+
+    while True:
+        combined = {**engine.active_trades, **engine.virtual_trades}
+        for sym, trade in list(combined.items()):
+            try:
+                t_data = await ex.fetch_ticker(sym); curr = t_data['last']
+                pnl = (curr - trade.entry_price) / trade.entry_price * 100
+                if curr > trade.highest_price: trade.highest_price = curr
+                
+                if not trade.is_virtual and pnl >= 1.5 and not trade.is_secured:
+                    trade.stop_loss = trade.entry_price; trade.is_secured = True
+                    await engine.send_tg(f"🛡️ *تأمين صفقة {sym}*\nنقطة الدخول أصبحت هي الوقف.")
+
+                exit_r = ""
+                if pnl <= -2.5: exit_r = "Stop Loss"
+                elif pnl >= 6.0: exit_r = "Target Hit"
+
+                if exit_r:
+                    path = MISSED_CSV if trade.is_virtual else REAL_CSV
+                    with open(path, 'a', newline='') as f:
+                        writer = csv.writer(f); writer.writerow([datetime.now(), sym, trade.signal.strategy_name, trade.entry_price, curr, f"{pnl:.2f}", exit_r])
+                    
+                    if trade.is_virtual: del engine.virtual_trades[sym]
+                    else:
+                        engine.balance += trade.invested * (1 + pnl/100)
+                        del engine.active_trades[sym]; engine._save_state()
+                        await engine.send_tg(f"🏁 *إغلاق حقيقي {sym}*\nالنتيجة: `{pnl:.2f}%`\nالسبب: `{exit_r}`")
+            except: pass
+
+        import random
+        batch = random.sample(symbols, min(len(symbols), 35))
+        tasks = [engine.analyze(ex, s) for s in batch]
+        results = await asyncio.gather(*tasks)
+        
+        for sig in results:
+            if sig and sig.symbol not in engine.active_trades and sig.symbol not in engine.virtual_trades:
+                if len(engine.active_trades) < MAX_CONCURRENT_TRADES:
+                    equity = engine.balance + sum([t.invested for t in engine.active_trades.values()])
+                    invest = equity * 0.20
+                    if engine.balance >=
