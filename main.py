@@ -10,48 +10,51 @@ import os
 import httpx
 import csv
 from datetime import datetime, time, timedelta
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 import math
 
 # =========================================================
-# ⚙️ الإعدادات العامة (قابلة للتعديل بسهولة)
+# ⚙️ الإعدادات العامة (قابلة للتعديل)
 # =========================================================
 TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
 TELEGRAM_CHAT_ID = "5067771509"
 
 LOG_DIR = "/tmp/trading_logs"
-DB_FILE = os.path.join(LOG_DIR, "empire_v23.db")
+DB_FILE = os.path.join(LOG_DIR, "empire_v25.db")
 REAL_CSV = os.path.join(LOG_DIR, "real_trades.csv")
 MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 OPPORTUNITIES_CSV = os.path.join(LOG_DIR, "opportunities.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# إعدادات التداول
+# ========== إعدادات التداول ==========
 MAX_CONCURRENT_TRADES = 10
-RISK_PER_TRADE = 0.02          # 2% من الرصيد لكل صفقة
-STOP_LOSS_PCT = 0.025          # 2.5%
-TRAILING_ACTIVATE_PCT = 2.0    # تفعيل التريلينغ بعد 2% ربح
-TRAILING_DISTANCE_PCT = 1.5    # مسافة التريلينغ 1.5%
-PARTIAL_TP_PCT = 4.0           # جني أرباح جزئي عند 4%
-PARTIAL_CLOSE_RATIO = 0.5      # إغلاق 50%
-FINAL_TP_PCT = 8.0             # الهدف النهائي 8%
+RISK_PER_TRADE = 0.02
+STOP_LOSS_PCT = 0.025
+TRAILING_ACTIVATE_PCT = 2.0
+TRAILING_DISTANCE_PCT = 1.5
+PARTIAL_TP_PCT = 4.0
+PARTIAL_CLOSE_RATIO = 0.5
+FINAL_TP_PCT = 8.0
 
-# إعدادات المسح
+# ========== إعدادات المسح ==========
 TOTAL_SYMBOLS_TO_SCAN = 1000
 SCAN_INTERVAL = 10
 BATCH_SIZE = 50
 
-# إعدادات الفلاتر والدرجات
-MIN_VOTES = 4                  # الحد الأدنى للأصوات (من 6 مؤشرات أساسية)
-ENABLE_EXPLOSION_FILTER = True  # تشغيل فلتر الانفجار السريع
+# ========== إعدادات الفلاتر ==========
+MIN_VOTES = 4
+ENABLE_EXPLOSION_FILTER = True
 EXPLOSION_FILTER_MIN_CONDITIONS = 3
-
-# إعدادات السيولة
 MIN_24H_VOLUME_USD = 500000
 MAX_SPREAD_PCT = 0.1
 
+# ========== إعدادات فلتر الوقت (قابل للتعديل أو الإلغاء) ==========
+ENABLE_TIME_FILTER = False      # غيّر إلى False لتعطيل الفلتر نهائياً
+TIME_FILTER_START = 14          # ساعة البدء (0-23) بتوقيت UTC
+TIME_FILTER_END = 22            # ساعة النهاية
+
 # =========================================================
-# هيكل البيانات (موسع ليشمل الأنماط والدرجات)
+# هيكل البيانات
 # =========================================================
 @dataclass
 class TrainSignal:
@@ -78,24 +81,23 @@ class TradeInfo:
     take_profit: float
     entry_time: str = field(default_factory=lambda: datetime.now().isoformat())
     partial_closed: bool = False
-    is_virtual: bool = False
 
 # =========================================================
-# المحرك الرئيسي (مع جميع التحسينات)
+# المحرك الرئيسي
 # =========================================================
-class EmpireEngineV23:
+class EmpireEngineV25:
     def __init__(self):
         self.active_trades = {}
-        self.missed_trades = []          # فرص قوية ضائعة (لم يدخل بسبب limit أو رصيد)
-        self.watchlist = []              # فرص جيدة للمراقبة (سكور 80-120) دون دخول فوري
-        self.all_opportunities = []      # آخر 500 فرصة (للعرض)
+        self.missed_trades = []
+        self.watchlist = []
+        self.all_opportunities = []
         self.balance = 2000.0
         self.stats = {
             "scanned": 0,
             "opportunities_found": 0,
             "last_scan_time": None,
             "status": "Initializing",
-            "db_status": "🔴",
+            "db_status": "🟢",
             "api_status": "🔴"
         }
         self._init_storage()
@@ -108,7 +110,6 @@ class EmpireEngineV23:
             conn.execute("INSERT INTO config VALUES ('balance', 2000.0)")
         conn.commit()
         conn.close()
-        self.stats["db_status"] = "🟢"
         for f in [REAL_CSV, MISSED_CSV]:
             if not os.path.exists(f):
                 with open(f, 'w', newline='') as csvfile:
@@ -143,19 +144,15 @@ class EmpireEngineV23:
         avg_volume = df['v'].rolling(20).mean().iloc[-2]
         current_volume = df['v'].iloc[-1]
         volume_ok = (current_volume > avg_volume * 1.8) if avg_volume > 0 else False
-        
         price_change_3 = (df['c'].iloc[-1] - df['c'].iloc[-4]) / df['c'].iloc[-4] * 100
         momentum_ok = price_change_3 > 1.5
-        
         sma = df['c'].rolling(20).mean()
         std = df['c'].rolling(20).std()
         upper_bb = sma + (1.5 * std)
         bb_break_ok = df['c'].iloc[-1] > upper_bb.iloc[-1]
-        
         lower_bb = sma - (2 * std)
         bw = (upper_bb - lower_bb) / sma
         squeeze_ok = bw.iloc[-1] < 0.05
-        
         delta = df['c'].diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -163,7 +160,6 @@ class EmpireEngineV23:
         rsi_val = rsi.iloc[-1]
         rsi_increasing = rsi.iloc[-1] > rsi.iloc[-2] > rsi.iloc[-3]
         rsi_ok = rsi_val > 55 or rsi_increasing
-        
         conditions = []
         if volume_ok: conditions.append("VolumeSpike")
         if momentum_ok: conditions.append("Momentum3")
@@ -181,12 +177,10 @@ class EmpireEngineV23:
         bearish_score = 0
         patterns = []
         is_exit = False
-        
         avg_volume = df['v'].rolling(20).mean().iloc[-1]
         if avg_volume == 0:
             avg_volume = df['v'].iloc[-1]
-        
-        # Bullish Three Line Strike
+        # Three Line Strike
         if len(df) >= 4:
             last_4 = df.iloc[-4:]
             if (all(last_4['c'].iloc[i] < last_4['c'].iloc[i-1] for i in range(1, 4)) and
@@ -195,7 +189,6 @@ class EmpireEngineV23:
                 df['v'].iloc[-1] > avg_volume * 1.5):
                 bullish_score += 25
                 patterns.append("ThreeLineStrike")
-        
         # Hammer
         body = abs(df['c'].iloc[-1] - df['o'].iloc[-1])
         lower_wick = min(df['o'].iloc[-1], df['c'].iloc[-1]) - df['l'].iloc[-1]
@@ -204,7 +197,6 @@ class EmpireEngineV23:
             if df['v'].iloc[-1] > avg_volume * 1.2:
                 bullish_score += 15
                 patterns.append("Hammer")
-        
         # Bullish Engulfing
         if len(df) >= 2:
             if (df['c'].iloc[-1] > df['o'].iloc[-1] and 
@@ -213,7 +205,6 @@ class EmpireEngineV23:
                 df['v'].iloc[-1] > avg_volume * 1.3):
                 bullish_score += 15
                 patterns.append("BullishEngulfing")
-        
         # Morning Star
         if len(df) >= 3:
             last_3 = df.iloc[-3:]
@@ -224,7 +215,6 @@ class EmpireEngineV23:
                 df['v'].iloc[-1] > avg_volume * 1.2):
                 bullish_score += 18
                 patterns.append("MorningStar")
-        
         # Piercing Line
         if len(df) >= 2:
             if (df['c'].iloc[-2] < df['o'].iloc[-2] and
@@ -234,8 +224,7 @@ class EmpireEngineV23:
                 df['v'].iloc[-1] > avg_volume * 1.2):
                 bullish_score += 12
                 patterns.append("PiercingLine")
-        
-        # Three Black Crows (bearish)
+        # Three Black Crows
         if len(df) >= 3:
             last_3 = df.iloc[-3:]
             if (all(last_3['c'].iloc[i] < last_3['c'].iloc[i-1] for i in range(1, 3)) and
@@ -243,7 +232,6 @@ class EmpireEngineV23:
                 bearish_score += 20
                 patterns.append("ThreeBlackCrows")
                 is_exit = True
-        
         # Evening Star
         if len(df) >= 3:
             last_3 = df.iloc[-3:]
@@ -254,13 +242,11 @@ class EmpireEngineV23:
                 bearish_score += 15
                 patterns.append("EveningStar")
                 is_exit = True
-        
         # Shooting Star
         if body > 0 and upper_wick > body * 2 and lower_wick < body * 0.5:
             bearish_score += 12
             patterns.append("ShootingStar")
             is_exit = True
-        
         return bullish_score, bearish_score, patterns, is_exit
 
     # ---------- حالة السوق والتقاطع الذهبي ----------
@@ -302,15 +288,16 @@ class EmpireEngineV23:
         except:
             return 0, None
 
-    # ---------- التحليل الأساسي (مع كل الفلاتر والسكور) ----------
+    # ---------- التحليل الأساسي ----------
     async def analyze(self, ex, symbol):
         reason = None
         try:
-            # فلتر الوقت
-            now_utc = datetime.utcnow().time()
-            if not (time(14,0) <= now_utc <= time(22,0)):
-                reason = "وقت غير مناسب (خارج 14-22 UTC)"
-                return None, reason
+            # ---------- فلتر الوقت (قابل للإلغاء) ----------
+            if ENABLE_TIME_FILTER:
+                now_utc = datetime.utcnow().time()
+                if not (time(TIME_FILTER_START,0) <= now_utc <= time(TIME_FILTER_END,0)):
+                    reason = f"وقت غير مناسب (خارج {TIME_FILTER_START}-{TIME_FILTER_END} UTC)"
+                    return None, reason
 
             # فريم 15 دقيقة للاتجاه
             ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=50)
@@ -380,7 +367,7 @@ class EmpireEngineV23:
             macd_hist = macd - macd_signal
             macd_bullish = macd.iloc[-1] > macd_signal.iloc[-1] and macd_hist.iloc[-1] > macd_hist.iloc[-2]
 
-            # Divergence (نسخة مبسطة)
+            # Divergence بسيط
             divergence = None
             if len(df) >= 20:
                 price_lows = []
@@ -400,10 +387,11 @@ class EmpireEngineV23:
             market_score, market_reason = await self.get_market_condition_score(ex, symbol)
             golden_score, golden_reason = await self.get_golden_cross_score(ex, symbol)
 
-            # جمع الأصوات
+            # حساب حجم التداول النسبي
             avg_volume = df['v'].rolling(20).mean().iloc[-2]
             volume_ratio = df['v'].iloc[-1] / avg_volume if avg_volume > 0 else 1
 
+            # جمع الأصوات
             votes = []
             if bw.iloc[-1] < bw.rolling(30).min().iloc[-2] * 1.1:
                 votes.append("Squeeze")
@@ -425,21 +413,9 @@ class EmpireEngineV23:
             rsi_score = max(0, (rsi_val - 50) / 5) if rsi_val > 50 else 0
             volume_score = min(volume_ratio * 5, 15)
             bw_score = max(0, (0.5 - bw.iloc[-1]) * 20) if bw.iloc[-1] < 0.5 else 0
-            liquidity_score = 0
-            if vol_24h > 200_000_000:
-                liquidity_score = 15
-            elif vol_24h > 50_000_000:
-                liquidity_score = 10
-            elif vol_24h > 5_000_000:
-                liquidity_score = 5
+            liquidity_score = 15 if vol_24h > 200_000_000 else (10 if vol_24h > 50_000_000 else (5 if vol_24h > 5_000_000 else 0))
             spread_score = 10 if spread < 0.05 else 0
-            volume_spike_score = 0
-            if volume_ratio >= 5:
-                volume_spike_score = 20
-            elif volume_ratio >= 3:
-                volume_spike_score = 15
-            elif volume_ratio >= 2:
-                volume_spike_score = 10
+            volume_spike_score = 20 if volume_ratio >= 5 else (15 if volume_ratio >= 3 else (10 if volume_ratio >= 2 else 0))
 
             total_score = base_score + rsi_score + volume_score + bw_score + liquidity_score + spread_score + volume_spike_score + market_score + (golden_score or 0)
             if divergence == "bullish":
@@ -459,9 +435,8 @@ class EmpireEngineV23:
 
             # نقطة الدخول المقترحة
             ask_price = ticker['ask'] if ticker['ask'] else df['c'].iloc[-1] * (1 + spread/100)
-            entry_point = ask_price  # يمكن تعديلها لاحقاً
+            entry_point = ask_price
 
-            # القرار النهائي
             if len(votes) >= MIN_VOTES:
                 extra_scores = {
                     'base': base_score, 'rsi': round(rsi_score,2), 'volume': volume_score,
@@ -485,12 +460,11 @@ class EmpireEngineV23:
             else:
                 reason = f"أصوات غير كافية ({len(votes)}/{MIN_VOTES})"
                 return None, reason
-
         except Exception as e:
             reason = f"خطأ: {str(e)[:50]}"
             return None, reason
 
-    # ---------- تحديث الصفقات المفتوحة (وقف متحرك وجني أرباح جزئي) ----------
+    # ---------- تحديث الصفقات المفتوحة ----------
     async def update_trades(self, ex):
         for sym, trade in list(self.active_trades.items()):
             try:
@@ -531,16 +505,22 @@ class EmpireEngineV23:
                     self._save_balance()
                     with open(REAL_CSV, 'a', newline='') as f:
                         csv.writer(f).writerow([datetime.now().isoformat(), sym, trade.entry_price, curr, f"{total_pnl:.2f}"])
-                    await send_tg(f"🏁 *إغلاق {sym}*\nالربح: `{total_pnl:.2f}%`\nالسبب: {exit_reason}\nالرصيد: {self.balance:.2f} USDT")
+                    await send_tg(
+                        f"🏁 *إغلاق {sym}*\n"
+                        f"الربح: `{total_pnl:.2f}%`\n"
+                        f"السبب: {exit_reason}\n"
+                        f"الرصيد: {self.balance:.2f} USDT\n"
+                        f"أعلى سعر: {trade.highest_price:.8f}"
+                    )
                     del self.active_trades[sym]
             except Exception as e:
                 pass
 
 # =========================================================
-# واجهة الويب (مع عرض السكور والأنماط)
+# واجهة الويب (Flask)
 # =========================================================
 app = Flask(__name__)
-engine = EmpireEngineV23()
+engine = EmpireEngineV25()
 
 @app.template_filter('duration')
 def duration_filter(iso_time):
@@ -561,7 +541,7 @@ def dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Empire V23 - التداول الذكي</title>
+        <title>Empire V25 - التداول الذكي</title>
         <style>
             * { box-sizing: border-box; }
             body { background: #020617; color: white; font-family: 'Segoe UI', sans-serif; padding: 20px; margin: 0; }
@@ -585,7 +565,7 @@ def dashboard():
         </style>
     </head>
     <body>
-        <h2>💎 إمبراطورية التداول V23 - التحليل الذكي</h2>
+        <h2>💎 إمبراطورية التداول V25 - التحليل الذكي</h2>
         <div class="status-bar">
             <div class="status-item">🟢 المنصة: {{ stats.api_status }}</div>
             <div class="status-item">🗄️ DB: {{ stats.db_status }}</div>
@@ -618,9 +598,9 @@ def dashboard():
                 </table>
             </div>
 
-            <!-- قائمة المراقبة (سكور 80-120) -->
+            <!-- قائمة المراقبة -->
             <div class="card">
-                <h3>👁️ قائمة المراقبة (سكور متوسط)</h3>
+                <h3>👁️ قائمة المراقبة (سكور 80-120)</h3>
                 <table>
                     <thead><tr><th>العملة</th><th>السعر</th><th>السكور</th><th>الأصوات</th><th>الأنماط</th></tr></thead>
                     <tbody>
@@ -633,13 +613,13 @@ def dashboard():
                         <td>{{ w.candle_patterns|join(',') if w.candle_patterns else '-' }}</td>
                     </tr>
                     {% else %}
-                    <td><td colspan="5">لا توجد عملات في المراقبة</td></tr>
+                    <tr><td colspan="5">لا توجد عملات في المراقبة</td></tr>
                     {% endfor %}
                     </tbody>
                 </table>
             </div>
 
-            <!-- سجل جميع الفرص (آخر 50) -->
+            <!-- سجل الفرص -->
             <div class="card full-width">
                 <h3>📋 سجل الفرص التي تم تحليلها</h3>
                 <div style="overflow-x: auto;">
@@ -691,12 +671,12 @@ async def send_tg(msg):
         pass
 
 # =========================================================
-# الحلقة الرئيسية للمسح (مع اختيار العملات حسب السكور)
+# الحلقة الرئيسية للمسح
 # =========================================================
 async def main_loop():
     ex = ccxt_async.gateio({'enableRateLimit': True})
     engine.stats["api_status"] = "🟢"
-    await send_tg("🚀 *Empire V23 démarré*\n✅ Filtre explosion\n✅ Score avancé avec chandeliers\n✅ Watchlist intelligente")
+    await send_tg("🚀 *Empire V25 démarré*\n✅ Page web active\n✅ Time filter: " + ("ON" if ENABLE_TIME_FILTER else "OFF"))
     
     markets = await ex.fetch_markets()
     symbols = [m['symbol'] for m in markets if m['symbol'].endswith('/USDT') and m['active']]
@@ -711,18 +691,16 @@ async def main_loop():
             random_symbols = np.random.choice(symbols, min(len(symbols), TOTAL_SYMBOLS_TO_SCAN), replace=False)
             all_signals = []
             
-            # مرحلة المسح
             for i in range(0, len(random_symbols), BATCH_SIZE):
                 batch = random_symbols[i:i+BATCH_SIZE]
                 tasks = [engine.analyze(ex, s) for s in batch]
                 results = await asyncio.gather(*tasks)
-                
                 for (sig, reason), symbol in zip(results, batch):
                     if sig:
                         all_signals.append(sig)
                         engine.stats["opportunities_found"] += 1
                         engine.log_opportunity(sig.symbol, sig.entry_price, sig.entry_point, sig.expected_pump_pct,
-                                               sig.votes, sig.score, "إشارة قوية (انتظار)", sig.strategies, sig.candle_patterns, sig.extra_scores)
+                                               sig.votes, sig.score, "إشارة قوية", sig.strategies, sig.candle_patterns, sig.extra_scores)
                         engine.all_opportunities.append(sig)
                     else:
                         dummy = TrainSignal(symbol=symbol, entry_price=0, expected_pump_pct=0, votes=0,
@@ -731,20 +709,32 @@ async def main_loop():
                         engine.log_opportunity(symbol, 0, 0, 0, 0, 0, reason or "لا توجد إشارة", [], [], {})
                         if len(engine.all_opportunities) > 500:
                             engine.all_opportunities = engine.all_opportunities[-500:]
-                
                 engine.stats["scanned"] += len(batch)
                 await asyncio.sleep(0.1)
             
-            # ترتيب الإشارات حسب السكور (تنازلي)
+            # ترتيب الإشارات حسب السكور
             all_signals.sort(key=lambda x: x.score, reverse=True)
             
-            # تصنيف الإشارات: دخول فوري، مراقبة، تجاهل
+            # إرسال أفضل عملة
+            if all_signals:
+                best = all_signals[0]
+                await send_tg(
+                    f"🏆 *أفضل عملة في هذا المسح*\n"
+                    f"العملة: {best.symbol}\n"
+                    f"السعر: {best.entry_price:.8f}\n"
+                    f"السكور: {best.score}\n"
+                    f"الأصوات: {best.votes}/6\n"
+                    f"الارتفاع المتوقع: {best.expected_pump_pct}%\n"
+                    f"الأنماط: {', '.join(best.candle_patterns) if best.candle_patterns else '-'}\n"
+                    f"الاستراتيجيات: {', '.join(best.strategies)}"
+                )
+            
+            # معالجة الإشارات للدخول
             engine.watchlist.clear()
             for sig in all_signals:
                 if sig.symbol in engine.active_trades:
                     continue
                 if sig.score >= 120:
-                    # فرصة ممتازة - نحاول الدخول
                     risk_amount = engine.balance * RISK_PER_TRADE
                     position_size = risk_amount / STOP_LOSS_PCT
                     invest = min(position_size, engine.balance)
@@ -765,33 +755,32 @@ async def main_loop():
                         engine.balance -= invest
                         engine._save_balance()
                         await send_tg(
-                            f"🟢 *ACHAT {sig.symbol}*\n"
-                            f"💰 Prix: {sig.entry_point:.8f}\n"
-                            f"📈 Pump estimé: {sig.expected_pump_pct}%\n"
-                            f"⭐ Score: {sig.score}\n"
-                            f"🎫 Votes: {sig.votes}/6\n"
-                            f"🕯️ Patterns: {', '.join(sig.candle_patterns) if sig.candle_patterns else '-'}\n"
-                            f"💵 Investi: {invest:.2f} USDT"
+                            f"🟢 *شراء {sig.symbol}*\n"
+                            f"💰 السعر: {sig.entry_point:.8f}\n"
+                            f"📈 الارتفاع المتوقع: {sig.expected_pump_pct}%\n"
+                            f"⭐ السكور: {sig.score}\n"
+                            f"🎫 الأصوات: {sig.votes}/6\n"
+                            f"🕯️ الأنماط: {', '.join(sig.candle_patterns) if sig.candle_patterns else '-'}\n"
+                            f"📊 الاستراتيجيات: {', '.join(sig.strategies)}\n"
+                            f"💵 المستثمر: {invest:.2f} USDT\n"
+                            f"🛑 وقف الخسارة: {stop_loss_price:.8f}\n"
+                            f"🎯 الهدف: {take_profit_price:.8f}"
                         )
                         engine.log_opportunity(sig.symbol, sig.entry_price, sig.entry_point, sig.expected_pump_pct,
                                                sig.votes, sig.score, "✅ تم الدخول", sig.strategies, sig.candle_patterns, sig.extra_scores)
                     else:
-                        # فرصة ممتازة لكن لا مكان - نضيفها للفرص الضائعة
-                        sig.reason = f"الحد الأقصى للصفقات أو رصيد غير كافٍ (مفتوحة: {len(engine.active_trades)})"
+                        sig.reason = f"حد الصفقات أو رصيد (مفتوحة: {len(engine.active_trades)})"
                         engine.missed_trades.append(sig)
                         engine.log_opportunity(sig.symbol, sig.entry_price, sig.entry_point, sig.expected_pump_pct,
                                                sig.votes, sig.score, sig.reason, sig.strategies, sig.candle_patterns, sig.extra_scores)
                 elif 80 <= sig.score < 120:
-                    # فرصة جيدة للمراقبة (لا تدخل الآن لكن ضعها في قائمة المراقبة)
                     engine.watchlist.append(sig)
                     engine.log_opportunity(sig.symbol, sig.entry_price, sig.entry_point, sig.expected_pump_pct,
-                                           sig.votes, sig.score, "مراقبة (سكور متوسط)", sig.strategies, sig.candle_patterns, sig.extra_scores)
+                                           sig.votes, sig.score, "مراقبة", sig.strategies, sig.candle_patterns, sig.extra_scores)
                 else:
-                    # فرصة ضعيفة (تسجيل فقط)
                     engine.log_opportunity(sig.symbol, sig.entry_price, sig.entry_point, sig.expected_pump_pct,
-                                           sig.votes, sig.score, "سكور منخفض (تجاهل)", sig.strategies, sig.candle_patterns, sig.extra_scores)
+                                           sig.votes, sig.score, "سكور منخفض", sig.strategies, sig.candle_patterns, sig.extra_scores)
             
-            # الاحتفاظ بآخر 100 فرصة ضائعة فقط
             if len(engine.missed_trades) > 100:
                 engine.missed_trades = engine.missed_trades[-100:]
             if len(engine.watchlist) > 50:
@@ -801,15 +790,17 @@ async def main_loop():
             await engine.update_trades(ex)
             
         except Exception as e:
-            print(f"Erreur dans main_loop: {e}")
-            await send_tg(f"⚠️ خطأ في البوت: {str(e)[:100]}")
+            print("Main loop error:", e)
+            await send_tg(f"⚠️ خطأ: {str(e)[:100]}")
             await asyncio.sleep(5)
-        
         await asyncio.sleep(SCAN_INTERVAL)
 
 # =========================================================
 # تشغيل الخادم والمحرك
 # =========================================================
+def run_flask():
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+
 if __name__ == "__main__":
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False), daemon=True).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(main_loop())
