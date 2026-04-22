@@ -6,6 +6,7 @@ import numpy as np
 import json
 import os
 import httpx
+import csv
 from datetime import datetime, time
 from dataclasses import dataclass, field, asdict
 import aiofiles
@@ -17,7 +18,7 @@ TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
 TELEGRAM_CHAT_ID = "5067771509"
 
 LOG_DIR = "/tmp/trading_logs"
-DB_FILE = os.path.join(LOG_DIR, "empire_v30.db")
+DB_FILE = os.path.join(LOG_DIR, "empire_v31.db")
 REAL_CSV = os.path.join(LOG_DIR, "real_trades.csv")
 MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 OPPORTUNITIES_CSV = os.path.join(LOG_DIR, "opportunities.csv")
@@ -52,6 +53,14 @@ TIME_FILTER_END = 22
 
 MIN_SCORE_FOR_WATCH = 60
 
+# ========== فلاتر الرموز (جديدة) ==========
+EXCLUDE_STABLECOINS = True
+EXCLUDE_VERY_LARGE_CAP = True
+MAX_24H_VOLUME_USD_FILTER = 500_000_000  # استبعاد العملات الأكبر من 500 مليون $ في 24 ساعة
+MIN_PRICE_USD = 0.00001
+MAX_PRICE_USD = 500
+STABLECOINS = ["USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "FDUSD", "UST", "USDD", "FRAX", "GUSD", "HUSD", "PAX", "USDK"]
+
 # =========================================================
 # هياكل البيانات
 # =========================================================
@@ -82,9 +91,9 @@ class TradeInfo:
     partial_closed: bool = False
 
 # =========================================================
-# المحرك الرئيسي (مع حفظ الحالة)
+# المحرك الرئيسي
 # =========================================================
-class EmpireEngineV30:
+class EmpireEngineV31:
     def __init__(self):
         self.active_trades = {}
         self.missed_trades = []
@@ -93,7 +102,6 @@ class EmpireEngineV30:
         self.balance = 2000.0
         self.stats = {"scanned": 0, "opportunities_found": 0, "last_scan_time": None}
         self._init_storage()
-        # بدء تحميل الحالة (سيتم استكماله بعد إنشاء الحلقة)
         self._load_state_sync()
 
     def _init_storage(self):
@@ -107,13 +115,13 @@ class EmpireEngineV30:
         for f in [REAL_CSV, MISSED_CSV]:
             if not os.path.exists(f):
                 with open(f, 'w', newline='') as csvfile:
-                    csv.writer(csvfile).writerow(['Time', 'Symbol', 'Entry', 'Exit', 'PNL%'])
+                    writer = csv.writer(csvfile)
+                    writer.writerow(['Time', 'Symbol', 'Entry', 'Exit', 'PNL%'])
         if not os.path.exists(OPPORTUNITIES_CSV):
             with open(OPPORTUNITIES_CSV, 'w', encoding='utf-8') as f:
                 f.write("Time,Symbol,Price,EntryPoint,ExpectedPump%,Votes,Score,Reason,Strategies,CandlePatterns,ExtraScores\n")
 
     def _load_state_sync(self):
-        """تحميل الحالة بشكل متزامن (لأنه في __init__)"""
         conn = sqlite3.connect(DB_FILE)
         try:
             row = conn.execute("SELECT value FROM config WHERE key='balance'").fetchone()
@@ -133,7 +141,6 @@ class EmpireEngineV30:
             conn.close()
 
     async def _save_state(self):
-        """حفظ الصفقات المفتوحة والرصيد"""
         conn = sqlite3.connect(DB_FILE)
         try:
             conn.execute("DELETE FROM active_trades")
@@ -185,7 +192,7 @@ class EmpireEngineV30:
         passed = len(conditions) >= EXPLOSION_FILTER_MIN_CONDITIONS
         return passed, conditions
 
-    # ---------- أنماط الشموع اليابانية ----------
+    # ---------- أنماط الشموع (مختصرة لتوفير المساحة، نفس الإصدار السابق) ----------
     def detect_candlestick_patterns(self, df):
         if len(df) < 30:
             return 0, 0, [], False
@@ -265,7 +272,6 @@ class EmpireEngineV30:
             is_exit = True
         return bullish_score, bearish_score, patterns, is_exit
 
-    # ---------- حالة السوق ----------
     async def get_market_condition_score(self, ex, symbol):
         try:
             ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=30)
@@ -304,7 +310,6 @@ class EmpireEngineV30:
         except:
             return 0, None
 
-    # ---------- التحليل الأساسي ----------
     async def analyze(self, ex, symbol):
         reason = None
         try:
@@ -463,7 +468,6 @@ class EmpireEngineV30:
             reason = f"خطأ: {str(e)[:50]}"
             return None, reason
 
-    # ---------- تحديث الصفقات ----------
     async def update_trades(self, ex):
         for sym, trade in list(self.active_trades.items()):
             try:
@@ -545,7 +549,7 @@ async def handle_telegram_commands():
                         if 'message' in update and 'text' in update['message']:
                             text = update['message']['text'].strip()
                             if text == '/start':
-                                await send_tg("مرحباً! البوت V30 (نهائي) - حفظ الحالة في SQLite\nالأوامر: /download_real, /download_missed, /download_opp, /status")
+                                await send_tg("مرحباً! البوت V31 (نهائي) - استبعاد العملات المستقرة والكبيرة\nالأوامر: /download_real, /download_missed, /download_opp, /status")
                             elif text == '/download_real':
                                 if os.path.exists(REAL_CSV):
                                     await send_document(REAL_CSV, "سجل الصفقات الحقيقية")
@@ -568,16 +572,42 @@ async def handle_telegram_commands():
         await asyncio.sleep(2)
 
 # =========================================================
-# حلقة التداول الرئيسية
+# حلقة التداول الرئيسية (مع فلتر الرموز)
 # =========================================================
 async def main_loop():
     global engine
     ex = ccxt_async.gateio({'enableRateLimit': True})
-    await send_tg("🚀 Empire V30 (نهائي) بدأ - حفظ الحالة في SQLite")
+    await send_tg("🚀 Empire V31 (نهائي) بدأ - استبعاد العملات المستقرة والكبيرة")
+    
+    # جلب جميع الرموز وتصفيتها
     markets = await ex.fetch_markets()
-    symbols = [m['symbol'] for m in markets if m['symbol'].endswith('/USDT') and m['active']]
+    raw_symbols = [m for m in markets if m['symbol'].endswith('/USDT') and m['active']]
+    symbols = []
+    
+    for market in raw_symbols:
+        base = market['base']
+        # استبعاد العملات المستقرة
+        if EXCLUDE_STABLECOINS and base in STABLECOINS:
+            continue
+        
+        # جلب التيكر للتحقق من الحجم والسعر (قد يبطئ قليلاً)
+        try:
+            ticker = await ex.fetch_ticker(market['symbol'])
+            vol_24h = ticker['quoteVolume'] if 'quoteVolume' in ticker else ticker['volume'] * ticker['last']
+            price = ticker['last']
+            
+            # استبعاد العملات ذات الحجم الضخم جداً
+            if EXCLUDE_VERY_LARGE_CAP and vol_24h > MAX_24H_VOLUME_USD_FILTER:
+                continue
+            # استبعاد العملات منخفضة أو مرتفعة السعر جداً
+            if price < MIN_PRICE_USD or price > MAX_PRICE_USD:
+                continue
+            symbols.append(market['symbol'])
+        except:
+            continue
+    
     symbols = symbols[:TOTAL_SYMBOLS_TO_SCAN]
-    await send_tg(f"📊 {len(symbols)} عملة جاهزة")
+    await send_tg(f"📊 {len(symbols)} عملة مؤهلة للمسح (بعد استبعاد المستقرة والكبيرة)")
     
     while True:
         try:
@@ -651,7 +681,7 @@ async def main_loop():
 # =========================================================
 async def main():
     global engine
-    engine = EmpireEngineV30()
+    engine = EmpireEngineV31()
     asyncio.create_task(handle_telegram_commands())
     await main_loop()
 
