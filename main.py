@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from flask import Flask, render_template_string, send_file
+from flask import Flask, render_template_string
 import sqlite3
 import ccxt.async_support as ccxt_async
 import pandas as pd
@@ -13,27 +13,29 @@ from datetime import datetime
 from dataclasses import dataclass, field, asdict
 
 # =========================================================
-# ⚙️ الإعدادات النهائية (Configuration)
+# ⚙️ الإعدادات العامة
 # =========================================================
 TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
 TELEGRAM_CHAT_ID = "5067771509"
 
 LOG_DIR = "/tmp/trading_logs"
-DB_FILE = os.path.join(LOG_DIR, "empire_final_v8_1.db")
-REAL_CSV = os.path.join(LOG_DIR, "trading_history.csv")
+DB_FILE = os.path.join(LOG_DIR, "empire_v19.db")
+REAL_CSV = os.path.join(LOG_DIR, "real_trades.csv")
 MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-INITIAL_BALANCE = 1000.0
-MAX_CONCURRENT_TRADES = 5
-SCAN_INTERVAL = 10
+MAX_CONCURRENT_TRADES = 10 
+TRADE_AMOUNT = 100.0
+TOTAL_SYMBOLS_TO_SCAN = 1000
 
 @dataclass
 class TrainSignal:
     symbol: str
     entry_price: float
-    strategy_name: str
-    timeframe_confirmed: bool
+    votes: int
+    strategies: list
+    expected_pump: float
+    time_found: str = field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
 
 @dataclass
 class TradeInfo:
@@ -43,279 +45,177 @@ class TradeInfo:
     invested: float
     highest_price: float
     stop_loss: float
+    take_profit: float
+    entry_time: str = field(default_factory=lambda: datetime.now().isoformat())
     is_virtual: bool = False
-    is_secured: bool = False
-    entry_time: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 # =========================================================
-# 🚀 المحرك الإمبراطوري المتكامل (The Master Engine)
+# 🚀 المحرك الرئيسي (V19 Engine)
 # =========================================================
-class ImperialMasterEngine:
+class EmpireEngineV19:
     def __init__(self):
         self.active_trades = {}
-        self.virtual_trades = {}
-        self.balance = INITIAL_BALANCE
+        self.missed_trades = []
+        self.balance = 2000.0
+        self.stats = {"scanned": 0, "status": "Initializing", "db_status": "🔴", "api_status": "🔴"}
         self._init_storage()
-        self._load_state()
 
     def _init_storage(self):
         conn = sqlite3.connect(DB_FILE)
-        conn.execute("CREATE TABLE IF NOT EXISTS active_trades (symbol TEXT PRIMARY KEY, data TEXT)")
         conn.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value REAL)")
         if not conn.execute("SELECT value FROM config WHERE key='balance'").fetchone():
-            conn.execute("INSERT INTO config VALUES ('balance', ?)", (INITIAL_BALANCE,))
-        conn.commit()
-        conn.close()
-        for path in [REAL_CSV, MISSED_CSV]:
-            if not os.path.exists(path):
-                with open(path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['Time', 'Symbol', 'Strategy', 'Entry', 'Exit', 'PNL%', 'Status'])
-
-    def _save_state(self):
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute("DELETE FROM active_trades")
-        for sym, t in self.active_trades.items():
-            conn.execute("INSERT INTO active_trades VALUES (?, ?)", (sym, json.dumps(asdict(t))))
-        conn.execute("UPDATE config SET value = ? WHERE key = 'balance'", (self.balance,))
-        conn.commit()
-        conn.close()
-
-    def _load_state(self):
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            self.balance = conn.execute("SELECT value FROM config WHERE key='balance'").fetchone()[0]
-            rows = conn.execute("SELECT data FROM active_trades").fetchall()
-            for r in rows:
-                d = json.loads(r[0])
-                sig = TrainSignal(**d.pop('signal'))
-                self.active_trades[d['symbol']] = TradeInfo(**d, signal=sig)
-            conn.close()
-        except:
-            pass
-
-    async def send_tg(self, msg: str):
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
-        except:
-            pass
+            conn.execute("INSERT INTO config VALUES ('balance', 2000.0)")
+        conn.commit(); conn.close()
+        self.stats["db_status"] = "🟢"
+        
+        for f in [REAL_CSV, MISSED_CSV]:
+            if not os.path.exists(f):
+                with open(f, 'w', newline='') as csvfile:
+                    csv.writer(csvfile).writerow(['Time', 'Symbol', 'Entry', 'Exit', 'PNL%'])
 
     async def analyze(self, ex, symbol):
         try:
-            # فريم 15 دقيقة لتحديد الاتجاه الصاعد
-            ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-            df_15 = pd.DataFrame(ohlcv_15, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-            ema_50_15 = df_15['c'].ewm(span=50).mean().iloc[-1]
-            if df_15['c'].iloc[-1] < ema_50_15:
-                return None
+            ohlcv = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=50)
+            df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+            
+            # المؤشرات
+            sma = df['c'].rolling(20).mean(); std = df['c'].rolling(20).std()
+            upper_bb = sma + (2 * std); lower_bb = sma - (2 * std)
+            bw = (upper_bb - lower_bb) / sma
+            rsi = 100 - (100 / (1 + (df['c'].diff().clip(lower=0).rolling(14).mean() / df['c'].diff().clip(upper=0).abs().rolling(14).mean())))
 
-            # فريم 5 دقائق: Bollinger Bands + RSI + حجم
-            ohlcv_5 = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=50)
-            df_5 = pd.DataFrame(ohlcv_5, columns=['t', 'o', 'h', 'l', 'c', 'v'])
+            votes = []
+            if bw.iloc[-1] < bw.rolling(30).min().iloc[-2] * 1.1: votes.append("Squeeze") # ضيق البولنجر
+            if df['c'].iloc[-1] > sma.iloc[-1]: votes.append("Uptrend") # ترند صاعد
+            if df['v'].iloc[-1] > df['v'].rolling(20).mean().iloc[-2] * 2: votes.append("Volume") # سيولة
+            if rsi.iloc[-1] > 50: votes.append("Momentum")
+            if df['c'].iloc[-1] > upper_bb.iloc[-1]: votes.append("Breakout")
 
-            sma = df_5['c'].rolling(20).mean()
-            std = df_5['c'].rolling(20).std()
-            upper_bb = (sma + 2 * std).iloc[-1]
-
-            delta = df_5['c'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = 100 - (100 / (1 + gain / (loss + 1e-9)))
-
-            last_c = df_5['c'].iloc[-1]
-            vol_avg = df_5['v'].rolling(10).mean().iloc[-2]
-
-            is_breakout = last_c > upper_bb
-            is_momentum = 55 < rsi.iloc[-1] < 75
-            is_volume = df_5['v'].iloc[-1] > vol_avg * 2
-
-            if is_breakout and is_momentum and is_volume:
-                return TrainSignal(symbol=symbol, entry_price=last_c, strategy_name="نظام الامتياز (15m/5m)", timeframe_confirmed=True)
+            if len(votes) >= 3:
+                return TrainSignal(symbol, df['c'].iloc[-1], len(votes), votes, round(bw.iloc[-1]*100, 2))
             return None
-        except:
-            return None
+        except: return None
 
 # =========================================================
-# 🌐 واجهة الويب (تم إصلاح القالب HTML)
+# 🌐 واجهة الويب (Professional Dashboard)
 # =========================================================
 app = Flask(__name__)
-engine = ImperialMasterEngine()
+engine = EmpireEngineV19()
+
+@app.template_filter('duration')
+def duration_filter(iso_time):
+    diff = datetime.now() - datetime.fromisoformat(iso_time)
+    return f"{diff.seconds // 60} دقيقة"
 
 @app.route('/')
 def dashboard():
-    active_inv = sum([t.invested for t in engine.active_trades.values()])
-    equity = engine.balance + active_inv
-    v_count = len(engine.virtual_trades)
-
-    # لاحظ: تم إغلاق الـ triple-quoted string بشكل صحيح
-    html_template = """
-    <html dir="rtl"><head><meta charset="UTF-8"><title>Empire V8 Final</title>
+    curr_prices = {s: t.highest_price for s, t in engine.active_trades.items()}
+    html = """
+    <html dir="rtl"><head><meta charset="UTF-8"><title>Empire V19 Dashboard</title>
     <style>
         body { background: #020617; color: white; font-family: sans-serif; padding: 20px; }
-        .grid { display: flex; gap: 15px; justify-content: center; margin-bottom: 20px; }
-        .card { background: #1e293b; padding: 20px; border-radius: 10px; border-bottom: 4px solid #38bdf8; min-width: 200px; text-align: center; }
-        .btn { background: #38bdf8; color: #020617; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 10px; display: inline-block; }
-        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 10px; overflow: hidden; margin-top: 20px; }
-        th, td { padding: 12px; border-bottom: 1px solid #334155; text-align: center; }
-        .profit { color: #4ade80; font-weight: bold; } .virtual { color: #fbbf24; }
+        .status-bar { display: flex; justify-content: space-around; background: #1e293b; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-top: 4px solid #38bdf8; }
+        .grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+        .card { background: #0f172a; padding: 15px; border-radius: 10px; border: 1px solid #334155; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th { background: #1e293b; color: #38bdf8; padding: 10px; font-size: 0.8rem; }
+        td { padding: 10px; border-bottom: 1px solid #1e293b; text-align: center; }
+        .pnl-pos { color: #4ade80; } .pnl-neg { color: #f87171; }
+        .badge { background: #38bdf8; color: #020617; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
     </style></head><body>
-        <h1 style="color:#38bdf8; text-align:center;">🛡️ المحرك الإمبراطوري النهائي (V8.1)</h1>
+        <h2>💎 إمبراطورية التداول V19</h2>
+        <div class="status-bar">
+            <div>حالة المنصة: {{ stats.api_status }}</div>
+            <div>قاعدة البيانات: {{ stats.db_status }}</div>
+            <div>تم مسحه: {{ stats.scanned }} عملة</div>
+            <div>رصيد المحفظة: {{ "%.2f"|format(balance) }} $</div>
+        </div>
+
         <div class="grid">
-            <div class="card"><h3>إجمالي المحفظة</h3><p class="profit" style="font-size:1.5rem;">{{ "%.2f"|format(equity) }} USDT</p></div>
-            <div class="card"><h3>السيولة المتاحة</h3><p>{{ "%.2f"|format(balance) }}</p></div>
-            <div class="card"><h3>الفرص المراقبة</h3><p class="virtual">{{ v_count }}</p></div>
-        </div>
-        <div style="text-align:center;">
-            <a href="/dl_real" class="btn">📥 تحميل سجل الأرباح</a>
-            <a href="/dl_missed" class="btn" style="background:#fbbf24;">📥 تحميل سجل التحليل</a>
-        </div>
+            <div class="card">
+                <h3>🟢 صفقات مفتوحة ({{ active|length }}/10)</h3>
+                <table>
+                    <tr><th>العملة</th><th>الدخول</th><th>الهدف</th><th>الوقف</th><th>المدة</th><th>الربح العائم</th></tr>
+                    {% for s, t in active.items() %}
+                    <tr>
+                        <td><b>{{ s }}</b> <span class="badge">{{ t.signal.votes }}/5</span></td>
+                        <td>{{ t.entry_price }}</td>
+                        <td style="color:#4ade80">{{ "%.6f"|format(t.take_profit) }}</td>
+                        <td style="color:#f87171">{{ "%.6f"|format(t.stop_loss) }}</td>
+                        <td>{{ t.entry_time|duration }}</td>
+                        <td class="pnl-pos"> {{ "%.2f"|format(((prices[s]-t.entry_price)/t.entry_price)*100) }}% </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
 
-        <h2>🟢 صفقات حقيقية ({{ active|length }}/5)</h2>
-        <table>
-            <tr style="background:#334155;"><th>العملة</th><th>المبلغ المستثمر</th><th>الربح العائم</th><th>الحالة</th></tr>
-            {% for s, t in active.items() %}
-            <tr><td><b>{{ s }}</b></td><td>{{ "%.2f"|format(t.invested) }}</td>
-            <td class="profit">{{ "%.2f"|format(((t.highest_price - t.entry_price)/t.entry_price)*100) }}%</td>
-            <td>{{ "🛡️ مؤمنة" if t.is_secured else "⚡ نشطة" }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-
-        <h2 style="color:#fbbf24;">🟡 الفرص الضائعة (تحت المراقبة)</h2>
-        <table>
-            <tr style="background:#334155;"><th>العملة</th><th>سعر الاكتشاف</th><th>الربح الافتراضي</th><th>الاستراتيجية</th></tr>
-            {% for s, t in virtual.items() %}
-            <tr><td>{{ s }}</td><td>{{ t.entry_price }}</td><td class="virtual">{{ "%.2f"|format(((t.highest_price - t.entry_price)/t.entry_price)*100) }}%</td><td>{{ t.signal.strategy_name }}</td></tr>
-            {% endfor %}
-        </table>
+            <div class="card" style="border-top: 3px solid #fbbf24;">
+                <h3>🟡 صفقات ضائعة (تم رصدها ولم يتم دخولها)</h3>
+                <table>
+                    <tr><th>الوقت</th><th>العملة</th><th>قوة الإشارة</th><th>الاستراتيجيات</th><th>الصعود المتوقع</th></tr>
+                    {% for m in missed %}
+                    <tr>
+                        <td>{{ m.time_found }}</td>
+                        <td>{{ m.symbol }}</td>
+                        <td><span class="badge">{{ m.votes }}/5</span></td>
+                        <td style="font-size: 0.7rem;">{{ m.strategies|join(', ') }}</td>
+                        <td style="color:#fbbf24">+{{ m.expected_pump }}%</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
     </body></html>
-    """  # انتهى القالب بشكل صحيح
-
-    return render_template_string(html_template, balance=engine.balance, equity=equity, active=engine.active_trades, virtual=engine.virtual_trades, v_count=v_count)
-
-@app.route('/dl_real')
-def dl_r():
-    return send_file(REAL_CSV, as_attachment=True)
-
-@app.route('/dl_missed')
-def dl_m():
-    return send_file(MISSED_CSV, as_attachment=True)
+    """
+    return render_template_string(html, active=engine.active_trades, missed=engine.missed_trades[-10:], balance=engine.balance, stats=engine.stats, prices=curr_prices)
 
 # =========================================================
-# 🔄 محرك المعالجة والتلجرام (تم إكمال شرط if)
+# 🔄 حلقة التشغيل والمسح (Turbo Sync)
 # =========================================================
 async def main_loop():
     ex = ccxt_async.gateio({'enableRateLimit': True})
+    engine.stats["api_status"] = "🟢"
     markets = await ex.fetch_markets()
     symbols = [m['symbol'] for m in markets if m['symbol'].endswith('/USDT') and m['active']]
 
-    await engine.send_tg("🚀 *تم إطلاق النسخة V8.1 المصححة*\n- نظام الفريمات المزدوجة مفعل\n- تتبع الفرص الضائعة مفعل\n- إدارة المحفظة 20% مفعله")
-
     while True:
-        # مراقبة الصفقات المفتوحة وتحديثها
-        combined = {**engine.active_trades, **engine.virtual_trades}
-        for sym, trade in list(combined.items()):
-            try:
-                t_data = await ex.fetch_ticker(sym)
-                curr = t_data['last']
+        try:
+            # 1. إدارة الصفقات
+            for sym, trade in list(engine.active_trades.items()):
+                t_data = await ex.fetch_ticker(sym); curr = t_data['last']
+                trade.highest_price = curr
                 pnl = (curr - trade.entry_price) / trade.entry_price * 100
-                if curr > trade.highest_price:
-                    trade.highest_price = curr
+                
+                if pnl <= -2.5 or pnl >= 6.0:
+                    engine.balance += trade.invested * (1 + pnl/100)
+                    with open(REAL_CSV, 'a') as f: csv.writer(f).writerow([datetime.now(), sym, trade.entry_price, curr, f"{pnl:.2f}"])
+                    del engine.active_trades[sym]
 
-                # تأمين الصفقة عند ربح 1.5%
-                if not trade.is_virtual and pnl >= 1.5 and not trade.is_secured:
-                    trade.stop_loss = trade.entry_price
-                    trade.is_secured = True
-                    engine._save_state()
-                    await engine.send_tg(f"🛡️ *تأمين صفقة {sym}*\nنقطة الدخول أصبحت هي الوقف.")
+            # 2. مسح السوق (Turbo Scan)
+            engine.stats["scanned"] = 0
+            import random
+            for batch in range(0, 1000, 50):
+                tasks = [engine.analyze(ex, s) for s in random.sample(symbols, 50)]
+                results = await asyncio.gather(*tasks)
+                for sig in results:
+                    if sig:
+                        if sig.symbol not in engine.active_trades and len(engine.active_trades) < MAX_CONCURRENT_TRADES:
+                            engine.active_trades[sig.symbol] = TradeInfo(sig.symbol, sig, sig.entry_price, TRADE_AMOUNT, sig.entry_price, sig.entry_price*0.97, sig.entry_price*1.06)
+                            engine.balance -= TRADE_AMOUNT
+                            await send_tg(f"🚀 *تم دخول صفقة:* {sig.symbol}\nقوة الإشارة: `{sig.votes}/5`")
+                        else:
+                            engine.missed_trades.append(sig)
+                            with open(MISSED_CSV, 'a') as f: csv.writer(f).writerow([datetime.now(), sig.symbol, sig.entry_price, "MISSED", sig.votes])
+                engine.stats["scanned"] += 50
+                await asyncio.sleep(0.1)
 
-                exit_reason = ""
-                if pnl <= -2.5:
-                    exit_reason = "Stop Loss"
-                elif pnl >= 6.0:
-                    exit_reason = "Target Hit"
+        except: pass
+        await asyncio.sleep(10)
 
-                if exit_reason:
-                    csv_path = MISSED_CSV if trade.is_virtual else REAL_CSV
-                    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sym,
-                                         trade.signal.strategy_name, trade.entry_price, curr,
-                                         f"{pnl:.2f}", exit_reason])
-
-                    if trade.is_virtual:
-                        del engine.virtual_trades[sym]
-                    else:
-                        engine.balance += trade.invested * (1 + pnl / 100)
-                        del engine.active_trades[sym]
-                        engine._save_state()
-                        await engine.send_tg(f"🏁 *إغلاق حقيقي {sym}*\nالنتيجة: `{pnl:.2f}%`\nالسبب: `{exit_reason}`")
-            except:
-                pass
-
-        # البحث عن إشارات جديدة
-        import random
-        batch = random.sample(symbols, min(len(symbols), 35))
-        tasks = [engine.analyze(ex, s) for s in batch]
-        results = await asyncio.gather(*tasks)
-
-        for sig in results:
-            if sig and sig.symbol not in engine.active_trades and sig.symbol not in engine.virtual_trades:
-                equity = engine.balance + sum(t.invested for t in engine.active_trades.values())
-                invest = equity * 0.20
-
-                # الشرط مكتمل بشكل صحيح
-                if len(engine.active_trades) < MAX_CONCURRENT_TRADES and engine.balance >= invest:
-                    # فتح صفقة حقيقية
-                    trade_obj = TradeInfo(
-                        symbol=sig.symbol,
-                        signal=sig,
-                        entry_price=sig.entry_price,
-                        invested=invest,
-                        highest_price=sig.entry_price,
-                        stop_loss=sig.entry_price * 0.975,
-                        is_virtual=False,
-                        is_secured=False
-                    )
-                    engine.active_trades[sig.symbol] = trade_obj
-                    engine.balance -= invest
-                    engine._save_state()
-                    await engine.send_tg(
-                        f"🟢 *صفقة شراء حقيقية*\n"
-                        f"العملة: {sig.symbol}\n"
-                        f"السعر: {sig.entry_price:.8f}\n"
-                        f"المستثمر: {invest:.2f} USDT\n"
-                        f"الاستراتيجية: {sig.strategy_name}"
-                    )
-                else:
-                    # فتح صفقة افتراضية (فرصة ضائعة)
-                    virtual_trade = TradeInfo(
-                        symbol=sig.symbol,
-                        signal=sig,
-                        entry_price=sig.entry_price,
-                        invested=0.0,
-                        highest_price=sig.entry_price,
-                        stop_loss=sig.entry_price * 0.975,
-                        is_virtual=True,
-                        is_secured=False
-                    )
-                    engine.virtual_trades[sig.symbol] = virtual_trade
-                    # (اختياري) يمكن إرسال إشعار للفرص الضائعة إذا أردت
-
-        await asyncio.sleep(SCAN_INTERVAL)
-
-# =========================================================
-# 🚀 تشغيل الخادم والمحرك مع دعم PORT لـ Render
-# =========================================================
-def run_flask():
-    import os
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+async def send_tg(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    async with httpx.AsyncClient() as client: await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
     asyncio.run(main_loop())
