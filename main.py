@@ -1,65 +1,59 @@
 import asyncio
 import sqlite3
-import ccxt.pro as ccxt_pro
+import ccxt.async_support as ccxt_async
 import pandas as pd
 import numpy as np
 import json
 import os
 import httpx
 import csv
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from dataclasses import dataclass, field, asdict
 import aiofiles
-from loguru import logger
-import random
 
 # =========================================================
-# ⚙️ الإعدادات العامة
+# ⚙️ الإعدادات العامة (قابلة للتعديل)
 # =========================================================
 TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
 TELEGRAM_CHAT_ID = "5067771509"
 
 LOG_DIR = "/tmp/trading_logs"
-DB_FILE = os.path.join(LOG_DIR, "empire_v36_bybit_paper.db")
+DB_FILE = os.path.join(LOG_DIR, "empire_v32.db")
 REAL_CSV = os.path.join(LOG_DIR, "real_trades.csv")
 MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 OPPORTUNITIES_CSV = os.path.join(LOG_DIR, "opportunities.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ========== وضع التداول ==========
-PAPER_TRADING = True          # ✅ التداول الورقي: لا توجد صفقات حقيقية، كل شيء محاكاة
-EXCHANGE_NAME = "bybit"       # منصة Bybit
-
-# ========== إعدادات التداول ==========
+# إعدادات التداول
 MAX_CONCURRENT_TRADES = 50
+RISK_PER_TRADE = 0.02
 STOP_LOSS_PCT = 0.025
-TRAILING_ACTIVATE_PCT = 1.0
+TRAILING_ACTIVATE_PCT = 2.0
 TRAILING_DISTANCE_PCT = 1.5
 PARTIAL_TP_PCT = 4.0
 PARTIAL_CLOSE_RATIO = 0.5
 FINAL_TP_PCT = 8.0
 
-# حجم الصفقة حسب السكور
-SCORE_HIGH_THRESHOLD = 150
-SCORE_MEDIUM_THRESHOLD = 90
-RISK_PER_TRADE_HIGH = 0.03
-RISK_PER_TRADE_MEDIUM = 0.02
-RISK_PER_TRADE_LOW = 0.01
-SKIP_LOW_SCORE_ENTRY = False
+# إعدادات المسح
+TOTAL_SYMBOLS_TO_SCAN = 1000
+SCAN_INTERVAL = 10
+BATCH_SIZE = 50
 
-# ========== إعدادات المسح (محسنة لـ Bybit) ==========
-TOTAL_SYMBOLS_TO_SCAN = 400    # Bybit لديها حوالي 400-500 زوج USDT
-SCAN_INTERVAL = 12
-BATCH_SIZE = 30
-
-# ========== شروط الاختيار ==========
+# شروط الاختيار
 MIN_VOTES = 3
 ENABLE_EXPLOSION_FILTER = True
 EXPLOSION_FILTER_MIN_CONDITIONS = 2
 MIN_24H_VOLUME_USD = 300000
 MAX_SPREAD_PCT = 0.2
 
-# ========== فلاتر الرموز ==========
+# فلتر الوقت (معطل)
+ENABLE_TIME_FILTER = False
+TIME_FILTER_START = 14
+TIME_FILTER_END = 22
+
+MIN_SCORE_FOR_WATCH = 60
+
+# فلاتر الرموز (استبعاد العملات المستقرة والكبيرة جداً)
 EXCLUDE_STABLECOINS = True
 EXCLUDE_VERY_LARGE_CAP = True
 MAX_24H_VOLUME_USD_FILTER = 500_000_000
@@ -67,19 +61,11 @@ MIN_PRICE_USD = 0.00001
 MAX_PRICE_USD = 500
 STABLECOINS = ["USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "FDUSD", "UST", "USDD", "FRAX", "GUSD", "HUSD", "PAX", "USDK"]
 
-# ========== إعدادات التقارير ==========
-ENABLE_PERIODIC_REPORT = True
-PERIODIC_REPORT_INTERVAL_HOURS = 1
+# إعدادات الإرسال التلقائي لـ CSV
 AUTO_SEND_CSV = True
-AUTO_SEND_INTERVAL_HOURS = 1
-AUTO_SEND_FILE = OPPORTUNITIES_CSV
-AUTO_SEND_CAPTION = "📊 تقرير CSV تلقائي - وضع Paper Trading"
-
-# ========== الميزات المتقدمة (مخففة لتقليل الطلبات) ==========
-ENABLE_MULTI_TIMEFRAME = False      # تم تعطيلها لتقليل الطلبات
-ENABLE_ORDER_FLOW_CVD = False       # تم تعطيلها لأنها تتطلب order book
-ENABLE_MARKET_REGIME = True
-ENABLE_DYNAMIC_WEIGHTS = True
+AUTO_SEND_INTERVAL_HOURS = 1          # كل ساعة
+AUTO_SEND_FILE = OPPORTUNITIES_CSV     # الملف المرسل (يمكن تغييره إلى REAL_CSV أو MISSED_CSV)
+AUTO_SEND_CAPTION = "📊 تقرير تلقائي: سجل جميع الفرص (آخر ساعة)"
 
 # =========================================================
 # هياكل البيانات
@@ -111,29 +97,15 @@ class TradeInfo:
     partial_closed: bool = False
 
 # =========================================================
-# دوال مساعدة
+# المحرك الرئيسي (مع حفظ الحالة)
 # =========================================================
-async def retry_async(func, max_retries=3, base_delay=1):
-    for attempt in range(max_retries):
-        try:
-            return await func()
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-            logger.warning(f"Retry {attempt+1}/{max_retries} after {delay:.2f}s: {e}")
-            await asyncio.sleep(delay)
-
-# =========================================================
-# المحرك الرئيسي (وضع Paper Trading)
-# =========================================================
-class EmpireEngineV36Paper:
+class EmpireEngineV32:
     def __init__(self):
         self.active_trades = {}
         self.missed_trades = []
         self.watchlist = []
         self.all_opportunities = []
-        self.balance = 2000.0  # رصيد وهمي
+        self.balance = 2000.0
         self.stats = {"scanned": 0, "opportunities_found": 0, "last_scan_time": None}
         self._init_storage()
         self._load_state_sync()
@@ -146,13 +118,14 @@ class EmpireEngineV36Paper:
             conn.execute("INSERT INTO config VALUES ('balance', 2000.0)")
         conn.commit()
         conn.close()
-        for f, header in [(REAL_CSV, ['Time', 'Symbol', 'Entry', 'Exit', 'PNL%']),
-                          (MISSED_CSV, ['Time', 'Symbol', 'Entry', 'Exit', 'PNL%']),
-                          (OPPORTUNITIES_CSV, ['Time', 'Symbol', 'Price', 'EntryPoint', 'ExpectedPump%', 'Votes', 'Score', 'Reason', 'Strategies', 'CandlePatterns', 'ExtraScores'])]:
+        for f in [REAL_CSV, MISSED_CSV]:
             if not os.path.exists(f):
-                with open(f, 'w', newline='', encoding='utf-8') as file:
-                    writer = csv.writer(file)
-                    writer.writerow(header)
+                with open(f, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(['Time', 'Symbol', 'Entry', 'Exit', 'PNL%'])
+        if not os.path.exists(OPPORTUNITIES_CSV):
+            with open(OPPORTUNITIES_CSV, 'w', encoding='utf-8') as f:
+                f.write("Time,Symbol,Price,EntryPoint,ExpectedPump%,Votes,Score,Reason,Strategies,CandlePatterns,ExtraScores\n")
 
     def _load_state_sync(self):
         conn = sqlite3.connect(DB_FILE)
@@ -167,9 +140,9 @@ class EmpireEngineV36Paper:
                 signal = TrainSignal(**sig_dict)
                 trade = TradeInfo(**d, signal=signal)
                 self.active_trades[trade.symbol] = trade
-            logger.info(f"Loaded {len(self.active_trades)} active trades, balance={self.balance}")
+            print(f"Loaded {len(self.active_trades)} active trades, balance={self.balance}")
         except Exception as e:
-            logger.error(f"Load state error: {e}")
+            print(f"Load state error: {e}")
         finally:
             conn.close()
 
@@ -184,7 +157,7 @@ class EmpireEngineV36Paper:
             conn.execute("UPDATE config SET value = ? WHERE key = 'balance'", (self.balance,))
             conn.commit()
         except Exception as e:
-            logger.error(f"Save state error: {e}")
+            print(f"Save state error: {e}")
         finally:
             conn.close()
 
@@ -192,12 +165,6 @@ class EmpireEngineV36Paper:
         async with aiofiles.open(OPPORTUNITIES_CSV, 'a', encoding='utf-8') as f:
             line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{symbol},{price},{entry_point},{expected_pump},{votes},{score:.2f},{reason},{'|'.join(strategies)},{'|'.join(candle_patterns) if candle_patterns else ''},{json.dumps(extra_scores or {})}"
             await f.write(line + "\n")
-            await f.flush()
-
-    async def log_real_trade(self, symbol, entry, exit_price, pnl):
-        async with aiofiles.open(REAL_CSV, 'a', encoding='utf-8') as f:
-            await f.write(f"{datetime.now().isoformat()},{symbol},{entry},{exit_price},{pnl:.2f}\n")
-            await f.flush()
 
     # ---------- فلتر الانفجار السريع ----------
     async def explosion_filter(self, df):
@@ -231,7 +198,7 @@ class EmpireEngineV36Paper:
         passed = len(conditions) >= EXPLOSION_FILTER_MIN_CONDITIONS
         return passed, conditions
 
-    # ---------- أنماط الشموع (مختصرة) ----------
+    # ---------- أنماط الشموع اليابانية ----------
     def detect_candlestick_patterns(self, df):
         if len(df) < 30:
             return 0, 0, [], False
@@ -311,11 +278,10 @@ class EmpireEngineV36Paper:
             is_exit = True
         return bullish_score, bearish_score, patterns, is_exit
 
-    # ---------- حالة السوق ----------
     async def get_market_condition_score(self, ex, symbol):
         try:
-            ohlcv_15 = await retry_async(lambda: ex.fetch_ohlcv(symbol, timeframe='15m', limit=30))
-            ohlcv_1h = await retry_async(lambda: ex.fetch_ohlcv(symbol, timeframe='1h', limit=100))
+            ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=30)
+            ohlcv_1h = await ex.fetch_ohlcv(symbol, timeframe='1h', limit=100)
             if len(ohlcv_15) < 30 or len(ohlcv_1h) < 50:
                 return 0, "Insufficient data"
             df_15 = pd.DataFrame(ohlcv_15, columns=['t','o','h','l','c','v'])
@@ -337,7 +303,7 @@ class EmpireEngineV36Paper:
 
     async def get_golden_cross_score(self, ex, symbol):
         try:
-            ohlcv_4h = await retry_async(lambda: ex.fetch_ohlcv(symbol, timeframe='4h', limit=100))
+            ohlcv_4h = await ex.fetch_ohlcv(symbol, timeframe='4h', limit=100)
             if len(ohlcv_4h) < 50:
                 return 0, None
             df = pd.DataFrame(ohlcv_4h, columns=['t','o','h','l','c','v'])
@@ -350,37 +316,16 @@ class EmpireEngineV36Paper:
         except:
             return 0, None
 
-    # ---------- كشف حالة السوق (Regime) ----------
-    async def detect_market_regime(self, ex, symbol):
-        if not ENABLE_MARKET_REGIME:
-            return "normal", 1.0
-        try:
-            ohlcv = await retry_async(lambda: ex.fetch_ohlcv(symbol, timeframe='1h', limit=100))
-            df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
-            atr = (df['h'].rolling(14).max() - df['l'].rolling(14).min()) / 14
-            volatility = atr.iloc[-1] / df['c'].iloc[-1] * 100
-            ema50 = df['c'].ewm(span=50).mean().iloc[-1]
-            ema200 = df['c'].ewm(span=200).mean().iloc[-1]
-            price = df['c'].iloc[-1]
-            if volatility > 5:
-                return "high_volatility", 0.7
-            if price > ema50 and ema50 > ema200:
-                return "strong_uptrend", 1.2
-            elif price > ema50:
-                return "weak_uptrend", 1.0
-            elif price < ema50:
-                return "downtrend", 0.5
-            else:
-                return "sideways", 0.8
-        except:
-            return "normal", 1.0
-
-    # ---------- التحليل الأساسي ----------
     async def analyze(self, ex, symbol):
         reason = None
         try:
-            # --- فريم 15 دقيقة (اتجاه) ---
-            ohlcv_15 = await retry_async(lambda: ex.fetch_ohlcv(symbol, timeframe='15m', limit=30))
+            if ENABLE_TIME_FILTER:
+                now_utc = datetime.utcnow().time()
+                if not (time(TIME_FILTER_START,0) <= now_utc <= time(TIME_FILTER_END,0)):
+                    reason = "وقت غير مناسب"
+                    return None, reason
+
+            ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=30)
             if len(ohlcv_15) < 30:
                 reason = "بيانات 15 دقيقة غير كافية"
                 return None, reason
@@ -390,25 +335,20 @@ class EmpireEngineV36Paper:
                 reason = "اتجاه هابط"
                 return None, reason
 
-            # --- فريم 5 دقائق ---
-            ohlcv = await retry_async(lambda: ex.fetch_ohlcv(symbol, timeframe='5m', limit=100))
+            ohlcv = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=100)
             if len(ohlcv) < 60:
                 reason = "بيانات 5 دقائق غير كافية"
                 return None, reason
             df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
 
-            # --- فلتر الانفجار ---
             if ENABLE_EXPLOSION_FILTER:
                 passed, _ = await self.explosion_filter(df)
                 if not passed:
                     reason = "فلتر الانفجار"
                     return None, reason
 
-            # --- التيكر ---
-            ticker = await retry_async(lambda: ex.fetch_ticker(symbol))
-            vol_24h = ticker.get('quoteVolume', ticker.get('baseVolume', ticker['volume'] * ticker['last']))
-            if vol_24h is None:
-                vol_24h = ticker['volume'] * ticker['last']
+            ticker = await ex.fetch_ticker(symbol)
+            vol_24h = ticker['quoteVolume'] if 'quoteVolume' in ticker else ticker['volume'] * ticker['last']
             spread = (ticker['ask'] - ticker['bid']) / ticker['last'] * 100 if ticker['ask'] and ticker['bid'] else 100
             if vol_24h < MIN_24H_VOLUME_USD:
                 reason = "حجم منخفض"
@@ -417,7 +357,6 @@ class EmpireEngineV36Paper:
                 reason = "سبريد عالٍ"
                 return None, reason
 
-            # --- المؤشرات الفنية ---
             sma = df['c'].rolling(20).mean()
             std = df['c'].rolling(20).std()
             upper_bb = sma + (2 * std)
@@ -446,7 +385,6 @@ class EmpireEngineV36Paper:
             macd_hist = macd - macd_signal
             macd_bullish = macd.iloc[-1] > macd_signal.iloc[-1] and macd_hist.iloc[-1] > macd_hist.iloc[-2]
 
-            # --- تباعد RSI ---
             divergence = None
             if len(df) >= 20:
                 price_lows = []
@@ -468,13 +406,6 @@ class EmpireEngineV36Paper:
             avg_volume = df['v'].rolling(20).mean().iloc[-2]
             volume_ratio = df['v'].iloc[-1] / avg_volume if avg_volume > 0 else 1
 
-            # --- حالة السوق (Regime) ---
-            regime, regime_multiplier = await self.detect_market_regime(ex, symbol)
-            if regime == "downtrend" or regime == "high_volatility":
-                reason = f"Market regime unfavorable: {regime}"
-                return None, reason
-
-            # --- جمع الأصوات ---
             votes = []
             if bw.iloc[-1] < bw.rolling(30).min().iloc[-2] * 1.2:
                 votes.append("Squeeze")
@@ -491,9 +422,7 @@ class EmpireEngineV36Paper:
             if divergence == "bullish":
                 votes.append("BullishDivergence")
 
-            # --- حساب السكور (مع أوزان ديناميكية) ---
-            base_weight = 12 if regime == "strong_uptrend" else (10 if regime == "weak_uptrend" else 8)
-            base_score = len(votes) * base_weight
+            base_score = len(votes) * 10
             rsi_score = max(0, (rsi_val - 50) / 6) if rsi_val > 50 else 0
             volume_score = min(volume_ratio * 4, 12)
             bw_score = max(0, (0.5 - bw.iloc[-1]) * 15) if bw.iloc[-1] < 0.5 else 0
@@ -501,13 +430,11 @@ class EmpireEngineV36Paper:
             spread_score = 8 if spread < 0.08 else 0
             volume_spike_score = 15 if volume_ratio >= 5 else (10 if volume_ratio >= 3 else (5 if volume_ratio >= 1.8 else 0))
 
-            total_score = (base_score + rsi_score + volume_score + bw_score + liquidity_score +
-                           spread_score + volume_spike_score + market_score + (golden_score or 0)) * regime_multiplier
+            total_score = base_score + rsi_score + volume_score + bw_score + liquidity_score + spread_score + volume_spike_score + market_score + (golden_score or 0)
             if divergence == "bullish":
                 total_score += 15
             total_score = round(total_score, 2)
 
-            # --- أنماط الشموع ---
             candle_bullish, candle_bearish, candle_patterns, _ = self.detect_candlestick_patterns(df)
             if candle_bearish >= 15:
                 reason = "نمط هابط"
@@ -526,9 +453,7 @@ class EmpireEngineV36Paper:
                     'bw': round(bw_score,2), 'liquidity': liquidity_score, 'spread': spread_score,
                     'spike': volume_spike_score, 'market': market_score, 'golden': golden_score or 0,
                     'divergence': 15 if divergence == 'bullish' else 0,
-                    'candle_bullish': candle_bullish,
-                    'regime': regime,
-                    'multiplier': regime_multiplier
+                    'candle_bullish': candle_bullish
                 }
                 signal = TrainSignal(
                     symbol=symbol,
@@ -547,14 +472,12 @@ class EmpireEngineV36Paper:
                 return None, reason
         except Exception as e:
             reason = f"خطأ: {str(e)[:50]}"
-            logger.error(f"Analyze error for {symbol}: {e}")
             return None, reason
 
-    # ---------- تحديث الصفقات (محاكاة) ----------
     async def update_trades(self, ex):
         for sym, trade in list(self.active_trades.items()):
             try:
-                ticker = await retry_async(lambda: ex.fetch_ticker(sym))
+                ticker = await ex.fetch_ticker(sym)
                 curr = ticker['last']
                 pnl = (curr - trade.entry_price) / trade.entry_price * 100
                 if curr > trade.highest_price:
@@ -566,7 +489,7 @@ class EmpireEngineV36Paper:
                     self.balance += close_amount + profit_partial
                     trade.invested -= close_amount
                     trade.partial_closed = True
-                    await send_tg(f"📊 *جني أرباح جزئي {sym} (Paper)*\nالربح: {pnl:.2f}% | المتبقي: {trade.invested:.2f} USDT")
+                    await send_tg(f"📊 *جني أرباح جزئي {sym}*\nالربح: {pnl:.2f}% | المتبقي: {trade.invested:.2f} USDT")
                     await self._save_state()
 
                 if pnl >= TRAILING_ACTIVATE_PCT:
@@ -588,15 +511,16 @@ class EmpireEngineV36Paper:
                     total_pnl = (curr - trade.entry_price) / trade.entry_price * 100
                     self.balance += trade.invested * (1 + total_pnl/100)
                     await self._save_state()
-                    await self.log_real_trade(sym, trade.entry_price, curr, total_pnl)
-                    await send_tg(f"🏁 *إغلاق {sym} (Paper)*\nالربح: `{total_pnl:.2f}%`\nالسبب: {exit_reason}\nالرصيد: {self.balance:.2f} USDT")
+                    async with aiofiles.open(REAL_CSV, 'a') as f:
+                        await f.write(f"{datetime.now().isoformat()},{sym},{trade.entry_price},{curr},{total_pnl:.2f}\n")
+                    await send_tg(f"🏁 *إغلاق {sym}*\nالربح: `{total_pnl:.2f}%`\nالسبب: {exit_reason}\nالرصيد: {self.balance:.2f} USDT")
                     del self.active_trades[sym]
                     await self._save_state()
             except Exception as e:
-                logger.error(f"Update trade error for {sym}: {e}")
+                print(f"Update trade error: {e}")
 
 # =========================================================
-# دوال تلغرام والتقارير
+# دوال تلغرام
 # =========================================================
 async def send_tg(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -615,7 +539,7 @@ async def send_document(file_path, caption):
                 data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption}
                 await client.post(url, data=data, files=files)
     except Exception as e:
-        logger.error(f"Send doc error: {e}")
+        print(f"Send doc error: {e}")
 
 async def handle_telegram_commands():
     last_update_id = 0
@@ -631,10 +555,10 @@ async def handle_telegram_commands():
                         if 'message' in update and 'text' in update['message']:
                             text = update['message']['text'].strip()
                             if text == '/start':
-                                await send_tg("📊 *بوت التداول الورقي (Paper Trading)* - Bybit\n✅ يعمل بدون مفاتيح API\n✅ كل الصفقات محاكاة\nالأوامر:\n/download_real\n/download_missed\n/download_opp\n/status")
+                                await send_tg("مرحباً! البوت V32 (نهائي) - إرسال CSV تلقائي كل ساعة\nالأوامر:\n/download_real\n/download_missed\n/download_opp\n/status")
                             elif text == '/download_real':
                                 if os.path.exists(REAL_CSV):
-                                    await send_document(REAL_CSV, "سجل الصفقات المحاكاة")
+                                    await send_document(REAL_CSV, "سجل الصفقات الحقيقية")
                                 else:
                                     await send_tg("⚠️ الملف غير موجود.")
                             elif text == '/download_missed':
@@ -648,101 +572,50 @@ async def handle_telegram_commands():
                                 else:
                                     await send_tg("⚠️ الملف غير موجود.")
                             elif text == '/status':
-                                await send_tg(f"📈 *حالة البوت (Paper Trading)*\nالرصيد الوهمي: {engine.balance:.2f} USDT\nصفقات مفتوحة: {len(engine.active_trades)}/{MAX_CONCURRENT_TRADES}")
+                                await send_tg(f"📈 الحالة\nالرصيد: {engine.balance:.2f} USDT\nصفقات مفتوحة: {len(engine.active_trades)}/{MAX_CONCURRENT_TRADES}")
         except:
             pass
         await asyncio.sleep(2)
 
-async def periodic_report():
-    if not ENABLE_PERIODIC_REPORT:
-        return
-    await asyncio.sleep(120)
-    last_report_time = datetime.now()
-    while True:
-        try:
-            now = datetime.now()
-            closed_trades = []
-            if os.path.exists(REAL_CSV):
-                with open(REAL_CSV, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    for line in lines[1:]:
-                        parts = line.strip().split(',')
-                        if len(parts) >= 5:
-                            try:
-                                trade_time = datetime.fromisoformat(parts[0])
-                                if trade_time > last_report_time:
-                                    closed_trades.append({'time': trade_time.strftime("%H:%M"), 'symbol': parts[1], 'pnl': float(parts[4])})
-                            except:
-                                pass
-            msg = f"📊 *تقرير دوري (Paper Trading)* - {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            if engine.active_trades:
-                msg += f"🟢 *الصفقات المفتوحة ({len(engine.active_trades)}):*\n"
-                for sym, trade in list(engine.active_trades.items())[:10]:
-                    try:
-                        ticker = await engine.exchange.fetch_ticker(sym)
-                        curr = ticker['last']
-                        pnl = (curr - trade.entry_price) / trade.entry_price * 100
-                        duration = (datetime.now() - datetime.fromisoformat(trade.entry_time)).seconds // 60
-                        msg += f"• {sym}: {pnl:+.1f}% | {duration} دقيقة\n"
-                    except:
-                        msg += f"• {sym}: (لا يمكن تحديث السعر)\n"
-                if len(engine.active_trades) > 10:
-                    msg += f"... و{len(engine.active_trades)-10} صفقات أخرى\n"
-            else:
-                msg += "🟢 لا توجد صفقات مفتوحة.\n"
-            if closed_trades:
-                msg += f"\n🔒 *الصفقات المغلقة منذ آخر تقرير ({len(closed_trades)}):*\n"
-                for t in closed_trades[-10:]:
-                    emoji = "✅" if t['pnl'] > 0 else "❌"
-                    msg += f"{emoji} {t['symbol']}: {t['pnl']:+.1f}%\n"
-            else:
-                msg += "\n🔒 لا توجد صفقات مغلقة منذ آخر تقرير.\n"
-            msg += f"\n💰 *الرصيد الوهمي الحالي:* {engine.balance:.2f} USDT"
-            await send_tg(msg)
-            last_report_time = now
-        except Exception as e:
-            logger.error(f"Periodic report error: {e}")
-        await asyncio.sleep(PERIODIC_REPORT_INTERVAL_HOURS * 3600)
-
+# =========================================================
+# مهمة الإرسال التلقائي لـ CSV
+# =========================================================
 async def auto_send_csv_periodically():
+    """إرسال ملف CSV تلقائياً كل AUTO_SEND_INTERVAL_HOURS ساعة"""
     if not AUTO_SEND_CSV:
         return
-    await asyncio.sleep(60)
+    await asyncio.sleep(60)  # تأخير البداية لتجنب الإرسال فور التشغيل
     while True:
         try:
             if os.path.exists(AUTO_SEND_FILE):
                 await send_document(AUTO_SEND_FILE, AUTO_SEND_CAPTION)
-        except:
-            pass
+                print(f"[{datetime.now()}] Auto-sent {AUTO_SEND_FILE}")
+            else:
+                print(f"[{datetime.now()}] File {AUTO_SEND_FILE} not found")
+        except Exception as e:
+            print(f"Auto-send error: {e}")
         await asyncio.sleep(AUTO_SEND_INTERVAL_HOURS * 3600)
 
 # =========================================================
-# حلقة التداول الرئيسية (Paper Trading)
+# حلقة التداول الرئيسية (مع فلتر الرموز)
 # =========================================================
 async def main_loop():
     global engine
-    # استخدام ccxt.pro لجلب البيانات من Bybit (بدون مفاتيح)
-    exchange_class = getattr(ccxt_pro, EXCHANGE_NAME)
-    ex = exchange_class({'enableRateLimit': True})
-    if EXCHANGE_NAME == 'bybit':
-        ex.options['defaultType'] = 'spot'
-    engine.exchange = ex
-
-    await send_tg(f"🚀 *Empire V36 Paper Trading بدأ* - المنصة: {EXCHANGE_NAME.upper()}\n✅ وضع التداول الورقي (بدون أموال حقيقية)\n✅ يتم جلب البيانات الحقيقية من Bybit فقط")
-
-    # جلب الرموز وتصفيتها
-    markets = await retry_async(lambda: ex.fetch_markets())
+    ex = ccxt_async.gateio({'enableRateLimit': True})
+    await send_tg("🚀 Empire V32 (نهائي) بدأ - إرسال CSV تلقائي كل ساعة")
+    
+    # جلب جميع الرموز وتصفيتها
+    markets = await ex.fetch_markets()
     raw_symbols = [m for m in markets if m['symbol'].endswith('/USDT') and m['active']]
     symbols = []
+    
     for market in raw_symbols:
         base = market['base']
         if EXCLUDE_STABLECOINS and base in STABLECOINS:
             continue
         try:
-            ticker = await retry_async(lambda: ex.fetch_ticker(market['symbol']))
-            vol_24h = ticker.get('quoteVolume', ticker.get('baseVolume', ticker['volume'] * ticker['last']))
-            if vol_24h is None:
-                vol_24h = ticker['volume'] * ticker['last']
+            ticker = await ex.fetch_ticker(market['symbol'])
+            vol_24h = ticker['quoteVolume'] if 'quoteVolume' in ticker else ticker['volume'] * ticker['last']
             price = ticker['last']
             if EXCLUDE_VERY_LARGE_CAP and vol_24h > MAX_24H_VOLUME_USD_FILTER:
                 continue
@@ -751,9 +624,10 @@ async def main_loop():
             symbols.append(market['symbol'])
         except:
             continue
+    
     symbols = symbols[:TOTAL_SYMBOLS_TO_SCAN]
-    await send_tg(f"📊 {len(symbols)} عملة مؤهلة للمسح (بيانات حقيقية من Bybit - Paper Trading)")
-
+    await send_tg(f"📊 {len(symbols)} عملة مؤهلة للمسح (بعد استبعاد المستقرة والكبيرة)")
+    
     while True:
         try:
             scan_start = datetime.now()
@@ -761,7 +635,7 @@ async def main_loop():
             engine.stats["opportunities_found"] = 0
             random_symbols = np.random.choice(symbols, min(len(symbols), TOTAL_SYMBOLS_TO_SCAN), replace=False)
             all_signals = []
-
+            
             for i in range(0, len(random_symbols), BATCH_SIZE):
                 batch = random_symbols[i:i+BATCH_SIZE]
                 tasks = [engine.analyze(ex, s) for s in batch]
@@ -782,32 +656,13 @@ async def main_loop():
                             engine.all_opportunities = engine.all_opportunities[-500:]
                 engine.stats["scanned"] += len(batch)
                 await asyncio.sleep(0.1)
-
+            
             all_signals.sort(key=lambda x: x.score, reverse=True)
             if all_signals:
                 best = all_signals[0]
-
-                if best.score >= SCORE_HIGH_THRESHOLD:
-                    risk_ratio = RISK_PER_TRADE_HIGH
-                    size_msg = "كبير (3%)"
-                elif best.score >= SCORE_MEDIUM_THRESHOLD:
-                    risk_ratio = RISK_PER_TRADE_MEDIUM
-                    size_msg = "عادي (2%)"
-                else:
-                    if SKIP_LOW_SCORE_ENTRY:
-                        await send_tg(f"⚠️ أفضل عملة {best.symbol} سكور {best.score} منخفض، تم تخطيها (Paper Trading).")
-                        await engine.update_trades(ex)
-                        engine.stats["last_scan_time"] = scan_start.strftime("%H:%M:%S")
-                        await asyncio.sleep(SCAN_INTERVAL)
-                        continue
-                    else:
-                        risk_ratio = RISK_PER_TRADE_LOW
-                        size_msg = "صغير (1%)"
-
-                await send_tg(f"🏆 *أفضل عملة (Paper)*: {best.symbol} | سكور {best.score} | ارتفاع متوقع {best.expected_pump_pct}% | حجم: {size_msg}")
-
+                await send_tg(f"🏆 أفضل عملة: {best.symbol} | سكور {best.score} | ارتفاع متوقع {best.expected_pump_pct}%")
                 if best.symbol not in engine.active_trades:
-                    risk_amount = engine.balance * risk_ratio
+                    risk_amount = engine.balance * RISK_PER_TRADE
                     position_size = risk_amount / STOP_LOSS_PCT
                     invest = min(position_size, engine.balance)
                     if len(engine.active_trades) < MAX_CONCURRENT_TRADES and engine.balance >= invest:
@@ -826,17 +681,17 @@ async def main_loop():
                         engine.active_trades[best.symbol] = trade
                         engine.balance -= invest
                         await engine._save_state()
-                        await send_tg(f"🟢 *شراء وهمي {best.symbol}* (Paper Trading)\n💰 السعر: {best.entry_point:.8f}\n💵 المستثمر: {invest:.2f} USDT (نسبة المخاطرة: {risk_ratio*100:.0f}%)\n🎯 الهدف: {take_profit_price:.8f}\n🛑 وقف الخسارة: {stop_loss_price:.8f}")
+                        await send_tg(f"🟢 شراء {best.symbol} بمبلغ {invest:.2f} USDT")
                         await engine.log_opportunity(best.symbol, best.entry_price, best.entry_point, best.expected_pump_pct,
-                                                     best.votes, best.score, "✅ تم الدخول (Paper)", best.strategies, best.candle_patterns, best.extra_scores)
+                                                     best.votes, best.score, "✅ تم الدخول", best.strategies, best.candle_patterns, best.extra_scores)
                     else:
-                        await send_tg(f"⚠️ لا يمكن شراء {best.symbol} (Paper): حد الصفقات ({len(engine.active_trades)}/{MAX_CONCURRENT_TRADES}) أو رصيد وهمي غير كافٍ.")
-
+                        await send_tg(f"⚠️ لا يمكن شراء {best.symbol}: حد الصفقات ({len(engine.active_trades)}/{MAX_CONCURRENT_TRADES}) أو رصيد غير كافٍ.")
+            
             await engine.update_trades(ex)
             engine.stats["last_scan_time"] = scan_start.strftime("%H:%M:%S")
         except Exception as e:
-            logger.error(f"Main loop error: {e}")
-            await send_tg(f"⚠️ خطأ في البوت (Paper Trading): {str(e)[:100]}")
+            print("Main loop error:", e)
+            await send_tg(f"⚠️ خطأ: {str(e)[:100]}")
             await asyncio.sleep(5)
         await asyncio.sleep(SCAN_INTERVAL)
 
@@ -845,10 +700,9 @@ async def main_loop():
 # =========================================================
 async def main():
     global engine
-    engine = EmpireEngineV36Paper()
+    engine = EmpireEngineV32()
     asyncio.create_task(handle_telegram_commands())
-    asyncio.create_task(periodic_report())
-    asyncio.create_task(auto_send_csv_periodically())
+    asyncio.create_task(auto_send_csv_periodically())   # إرسال CSV تلقائي
     await main_loop()
 
 if __name__ == "__main__":
