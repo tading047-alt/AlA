@@ -12,13 +12,13 @@ from dataclasses import dataclass, field, asdict
 import aiofiles
 
 # =========================================================
-# ⚙️ الإعدادات العامة
+# ⚙️ الإعدادات العامة (قابلة للتعديل)
 # =========================================================
 TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
 TELEGRAM_CHAT_ID = "5067771509"
 
 LOG_DIR = "/tmp/trading_logs"
-DB_FILE = os.path.join(LOG_DIR, "empire_v31.db")
+DB_FILE = os.path.join(LOG_DIR, "empire_v32.db")
 REAL_CSV = os.path.join(LOG_DIR, "real_trades.csv")
 MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
 OPPORTUNITIES_CSV = os.path.join(LOG_DIR, "opportunities.csv")
@@ -53,13 +53,19 @@ TIME_FILTER_END = 22
 
 MIN_SCORE_FOR_WATCH = 60
 
-# ========== فلاتر الرموز (جديدة) ==========
+# فلاتر الرموز (استبعاد العملات المستقرة والكبيرة جداً)
 EXCLUDE_STABLECOINS = True
 EXCLUDE_VERY_LARGE_CAP = True
-MAX_24H_VOLUME_USD_FILTER = 500_000_000  # استبعاد العملات الأكبر من 500 مليون $ في 24 ساعة
+MAX_24H_VOLUME_USD_FILTER = 500_000_000
 MIN_PRICE_USD = 0.00001
 MAX_PRICE_USD = 500
 STABLECOINS = ["USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "FDUSD", "UST", "USDD", "FRAX", "GUSD", "HUSD", "PAX", "USDK"]
+
+# إعدادات الإرسال التلقائي لـ CSV
+AUTO_SEND_CSV = True
+AUTO_SEND_INTERVAL_HOURS = 1          # كل ساعة
+AUTO_SEND_FILE = OPPORTUNITIES_CSV     # الملف المرسل (يمكن تغييره إلى REAL_CSV أو MISSED_CSV)
+AUTO_SEND_CAPTION = "📊 تقرير تلقائي: سجل جميع الفرص (آخر ساعة)"
 
 # =========================================================
 # هياكل البيانات
@@ -91,9 +97,9 @@ class TradeInfo:
     partial_closed: bool = False
 
 # =========================================================
-# المحرك الرئيسي
+# المحرك الرئيسي (مع حفظ الحالة)
 # =========================================================
-class EmpireEngineV31:
+class EmpireEngineV32:
     def __init__(self):
         self.active_trades = {}
         self.missed_trades = []
@@ -192,7 +198,7 @@ class EmpireEngineV31:
         passed = len(conditions) >= EXPLOSION_FILTER_MIN_CONDITIONS
         return passed, conditions
 
-    # ---------- أنماط الشموع (مختصرة لتوفير المساحة، نفس الإصدار السابق) ----------
+    # ---------- أنماط الشموع اليابانية ----------
     def detect_candlestick_patterns(self, df):
         if len(df) < 30:
             return 0, 0, [], False
@@ -549,7 +555,7 @@ async def handle_telegram_commands():
                         if 'message' in update and 'text' in update['message']:
                             text = update['message']['text'].strip()
                             if text == '/start':
-                                await send_tg("مرحباً! البوت V31 (نهائي) - استبعاد العملات المستقرة والكبيرة\nالأوامر: /download_real, /download_missed, /download_opp, /status")
+                                await send_tg("مرحباً! البوت V32 (نهائي) - إرسال CSV تلقائي كل ساعة\nالأوامر:\n/download_real\n/download_missed\n/download_opp\n/status")
                             elif text == '/download_real':
                                 if os.path.exists(REAL_CSV):
                                     await send_document(REAL_CSV, "سجل الصفقات الحقيقية")
@@ -572,12 +578,31 @@ async def handle_telegram_commands():
         await asyncio.sleep(2)
 
 # =========================================================
+# مهمة الإرسال التلقائي لـ CSV
+# =========================================================
+async def auto_send_csv_periodically():
+    """إرسال ملف CSV تلقائياً كل AUTO_SEND_INTERVAL_HOURS ساعة"""
+    if not AUTO_SEND_CSV:
+        return
+    await asyncio.sleep(60)  # تأخير البداية لتجنب الإرسال فور التشغيل
+    while True:
+        try:
+            if os.path.exists(AUTO_SEND_FILE):
+                await send_document(AUTO_SEND_FILE, AUTO_SEND_CAPTION)
+                print(f"[{datetime.now()}] Auto-sent {AUTO_SEND_FILE}")
+            else:
+                print(f"[{datetime.now()}] File {AUTO_SEND_FILE} not found")
+        except Exception as e:
+            print(f"Auto-send error: {e}")
+        await asyncio.sleep(AUTO_SEND_INTERVAL_HOURS * 3600)
+
+# =========================================================
 # حلقة التداول الرئيسية (مع فلتر الرموز)
 # =========================================================
 async def main_loop():
     global engine
     ex = ccxt_async.gateio({'enableRateLimit': True})
-    await send_tg("🚀 Empire V31 (نهائي) بدأ - استبعاد العملات المستقرة والكبيرة")
+    await send_tg("🚀 Empire V32 (نهائي) بدأ - إرسال CSV تلقائي كل ساعة")
     
     # جلب جميع الرموز وتصفيتها
     markets = await ex.fetch_markets()
@@ -586,20 +611,14 @@ async def main_loop():
     
     for market in raw_symbols:
         base = market['base']
-        # استبعاد العملات المستقرة
         if EXCLUDE_STABLECOINS and base in STABLECOINS:
             continue
-        
-        # جلب التيكر للتحقق من الحجم والسعر (قد يبطئ قليلاً)
         try:
             ticker = await ex.fetch_ticker(market['symbol'])
             vol_24h = ticker['quoteVolume'] if 'quoteVolume' in ticker else ticker['volume'] * ticker['last']
             price = ticker['last']
-            
-            # استبعاد العملات ذات الحجم الضخم جداً
             if EXCLUDE_VERY_LARGE_CAP and vol_24h > MAX_24H_VOLUME_USD_FILTER:
                 continue
-            # استبعاد العملات منخفضة أو مرتفعة السعر جداً
             if price < MIN_PRICE_USD or price > MAX_PRICE_USD:
                 continue
             symbols.append(market['symbol'])
@@ -681,8 +700,9 @@ async def main_loop():
 # =========================================================
 async def main():
     global engine
-    engine = EmpireEngineV31()
+    engine = EmpireEngineV32()
     asyncio.create_task(handle_telegram_commands())
+    asyncio.create_task(auto_send_csv_periodically())   # إرسال CSV تلقائي
     await main_loop()
 
 if __name__ == "__main__":
