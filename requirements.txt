@@ -3,4 +3,5 @@ pandas
 numpy
 httpx
 aiofiles
-loguru
+flask
+requests
