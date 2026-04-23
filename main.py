@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 🚂 نظام اكتشاف الانفجارات - الإصدار النهائي مع الإعدادات المثلى
@@ -33,9 +33,9 @@ from enum import Enum
 # =========================================================
 # إعدادات تليجرام
 # =========================================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8439548325:AAHOBBHy7EwcX3J5neIaf6iJuSjyGJCuZ68")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "5067771509")
-BOT_TAG = "#yak_100"
+BOT_TAG = "#Exp100"
 
 # =========================================================
 # 🏆 الإعدادات المثلى (الذهبية)
