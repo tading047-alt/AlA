@@ -1,1076 +1,709 @@
- #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-🚂 نظام اكتشاف الانفجارات - الإصدار النهائي مع الإعدادات المثلى
-First Station Explosion Detector - Final Edition with Optimal Settings
-
-الإعدادات المثلى المدمجة:
-✅ استراتيجية خروج متكاملة (جني أرباح جزئي + وقف متحرك + وقف ثابت)
-✅ إعدادات وقف متحرك ذهبية (تفعيل 3% + مسافة 2%)
-✅ فلترة ذكية للإشارات عالية الجودة فقط
-✅ نطاق دخول مثالي لكل إشارة
-✅ إعدادات متكيفة حسب حالة السوق
-"""
-
 import asyncio
-import threading
-from flask import Flask, jsonify, render_template_string, send_file
 import sqlite3
 import ccxt.async_support as ccxt_async
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field, asdict
-import httpx
 import json
 import os
-import time
+import httpx
 import csv
-from collections import deque
-from enum import Enum
+from datetime import datetime, time
+from dataclasses import dataclass, field, asdict
+import aiofiles
 
 # =========================================================
-# إعدادات تليجرام
+# ⚙️ الإعدادات العامة (قابلة للتعديل)
 # =========================================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "5067771509")
-BOT_TAG = "#Exp100"
+TELEGRAM_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"
+TELEGRAM_CHAT_ID = "5067771509"
 
-# =========================================================
-# 🏆 الإعدادات المثلى (الذهبية)
-# =========================================================
-TOTAL_CAPITAL = 1000.0
-MAX_TRADES_PER_DAY = 8
-CAPITAL_PER_TRADE = 100.0
-MAX_CONCURRENT_TRADES = 3
-
-SCAN_INTERVAL = 45
-SCAN_BATCH_SIZE = 50
-SCAN_SYMBOLS_LIMIT = 300
-
-# إعدادات الثقة - إشارات قوية فقط
-MIN_CONFIDENCE = 70
-MIN_PATTERNS_REQUIRED = 2
-MIN_VOLUME_24H = 100000
-MAX_SPREAD = 0.3
-MAX_PRICE_CHANGE_24H = 10.0
-
-# أوزان الأنماط
-PATTERN_WEIGHTS = {
-    'calm_before_storm': 40,
-    'whale_accumulation': 45,
-    'bollinger_squeeze': 35,
-    'volume_spike': 20,
-    'momentum_building': 15,
-    'support_bounce': 25
-}
-
-ALLOWED_PATTERNS = ['whale_accumulation', 'calm_before_storm', 'bollinger_squeeze']
-
-# إعدادات BTC
-BTC_MIN_ADX = 20
-BTC_MAX_DROP_1H = -2.0
-
-# =========================================================
-# 🎯 استراتيجية الخروج المتكاملة (الإعدادات المثلى)
-# =========================================================
-EXIT_STRATEGY = {
-    # 1. جني أرباح جزئي سريع
-    'partial_take_profit': [
-        {'percent': 3.0, 'sell_ratio': 0.30},   # بيع 30% عند +3%
-        {'percent': 5.0, 'sell_ratio': 0.30},   # بيع 30% عند +5%
-    ],
-    
-    # 2. وقف متحرك للباقي (40%)
-    'trailing_stop': {
-        'activation': 3.0,      # تفعيل بعد +3%
-        'distance': 2.0,        # مسافة 2%
-        'apply_to': 'remaining' # يطبق على الكمية المتبقية
-    },
-    
-    # 3. وقف خسارة ثابت (حماية قصوى)
-    'hard_stop_loss': -2.5
-}
-
-# =========================================================
-# إعدادات الملفات وقاعدة البيانات
-# =========================================================
-LOG_DIR = "trading_logs"
+LOG_DIR = "/tmp/trading_logs"
+DB_FILE = os.path.join(LOG_DIR, "empire_v32.db")
+REAL_CSV = os.path.join(LOG_DIR, "real_trades.csv")
+MISSED_CSV = os.path.join(LOG_DIR, "missed_trades.csv")
+OPPORTUNITIES_CSV = os.path.join(LOG_DIR, "opportunities.csv")
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(f"{LOG_DIR}/daily", exist_ok=True)
 
-SIGNALS_FILE = f"{LOG_DIR}/signals_detected.csv"
-TRADES_FILE = f"{LOG_DIR}/trades_executed.csv"
-VIRTUAL_TRADES_FILE = f"{LOG_DIR}/virtual_trades.csv"
-SNAPSHOT_FILE = f"{LOG_DIR}/market_snapshots.csv"
-ERRORS_FILE = f"{LOG_DIR}/errors_log.csv"
-DB_FILE = f"{LOG_DIR}/bot_state.db"
+# إعدادات التداول
+MAX_CONCURRENT_TRADES = 50
+RISK_PER_TRADE = 0.02
+STOP_LOSS_PCT = 0.025
+TRAILING_ACTIVATE_PCT = 2.0
+TRAILING_DISTANCE_PCT = 1.5
+PARTIAL_TP_PCT = 4.0
+PARTIAL_CLOSE_RATIO = 0.5
+FINAL_TP_PCT = 8.0
+
+# إعدادات المسح
+TOTAL_SYMBOLS_TO_SCAN = 1000
+SCAN_INTERVAL = 10
+BATCH_SIZE = 50
+
+# شروط الاختيار
+MIN_VOTES = 3
+ENABLE_EXPLOSION_FILTER = True
+EXPLOSION_FILTER_MIN_CONDITIONS = 2
+MIN_24H_VOLUME_USD = 300000
+MAX_SPREAD_PCT = 0.2
+
+# فلتر الوقت (معطل)
+ENABLE_TIME_FILTER = False
+TIME_FILTER_START = 14
+TIME_FILTER_END = 22
+
+MIN_SCORE_FOR_WATCH = 60
+
+# فلاتر الرموز (استبعاد العملات المستقرة والكبيرة جداً)
+EXCLUDE_STABLECOINS = True
+EXCLUDE_VERY_LARGE_CAP = True
+MAX_24H_VOLUME_USD_FILTER = 500_000_000
+MIN_PRICE_USD = 0.00001
+MAX_PRICE_USD = 500
+STABLECOINS = ["USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "FDUSD", "UST", "USDD", "FRAX", "GUSD", "HUSD", "PAX", "USDK"]
+
+# إعدادات الإرسال التلقائي لـ CSV
+AUTO_SEND_CSV = True
+AUTO_SEND_INTERVAL_HOURS = 1          # كل ساعة
+AUTO_SEND_FILE = OPPORTUNITIES_CSV     # الملف المرسل (يمكن تغييره إلى REAL_CSV أو MISSED_CSV)
+AUTO_SEND_CAPTION = "📊 تقرير تلقائي: سجل جميع الفرص (آخر ساعة)"
 
 # =========================================================
-# قاعدة البيانات
+# هياكل البيانات
 # =========================================================
-def init_database():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS bot_status
-                 (id INTEGER PRIMARY KEY, 
-                  capital REAL, available REAL, active_trades INTEGER,
-                  daily_trades INTEGER, win_rate REAL, market_regime TEXT,
-                  btc_change REAL, last_update TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS trades_archive
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  symbol TEXT, entry_price REAL, exit_price REAL,
-                  pnl_pct REAL, pnl_usd REAL, entry_time TEXT,
-                  exit_time TEXT, pattern TEXT, status TEXT)''')
-    conn.commit()
-    conn.close()
-
-def update_db_status(capital, available, active, daily, win_rate, regime, btc_change):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM bot_status")
-    c.execute('''INSERT INTO bot_status 
-                 (capital, available, active_trades, daily_trades, win_rate, market_regime, btc_change, last_update)
-                 VALUES (?,?,?,?,?,?,?,?)''',
-              (capital, available, active, daily, win_rate, regime, btc_change, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-# =========================================================
-# أنواع البيانات
-# =========================================================
-class MarketRegime(Enum):
-    TRENDING_BULLISH = "trending_bullish"
-    TRENDING_BEARISH = "trending_bearish"
-    RANGING = "ranging"
-    TRANSITIONAL = "transitional"
-
 @dataclass
-class ExplosionSignal:
-    symbol: str
-    confidence: float
-    expected_move: float
-    time_to_explosion: int
-    entry_price: float
-    patterns: List[str]
-    volume_24h: float
-    current_change: float
-    priority: int
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    
-    def get_time_estimate(self) -> str:
-        minutes = self.time_to_explosion // 60
-        seconds = self.time_to_explosion % 60
-        if minutes > 0:
-            return f"{minutes} دقيقة و {seconds} ثانية"
-        return f"{seconds} ثانية"
-
-@dataclass
-class ActiveTrade:
+class TrainSignal:
     symbol: str
     entry_price: float
-    capital: float
-    quantity: float
-    remaining_quantity: float
-    entry_time: datetime
+    expected_pump_pct: float
+    votes: int
+    strategies: list
+    score: float
+    candle_patterns: list = field(default_factory=list)
+    reason: str = ""
+    entry_point: float = 0.0
+    extra_scores: dict = field(default_factory=dict)
+    time_found: str = field(default_factory=lambda: datetime.now().strftime("%H:%M:%S"))
+
+@dataclass
+class TradeInfo:
+    symbol: str
+    signal: TrainSignal
+    entry_price: float
+    invested: float
     highest_price: float
-    trailing_stop: float
-    trailing_activated: bool
-    take_profits_hit: List[float]
-    pattern: str
-    confidence: float
+    stop_loss: float
+    take_profit: float
+    entry_time: str = field(default_factory=lambda: datetime.now().isoformat())
+    partial_closed: bool = False
 
 # =========================================================
-# حاسبة نطاق الدخول
+# المحرك الرئيسي (مع حفظ الحالة)
 # =========================================================
-class EntryRangeCalculator:
+class EmpireEngineV32:
     def __init__(self):
-        self.base_range = 0.01
-        self.priority_multipliers = {5: 1.5, 4: 1.3, 3: 1.1, 2: 0.9, 1: 0.7}
-        self.pattern_multipliers = {6: 1.4, 5: 1.3, 4: 1.2, 3: 1.1, 2: 1.0, 1: 0.8}
-        
-    def calculate(self, signal: ExplosionSignal) -> dict:
-        current_price = signal.entry_price
-        priority_mult = self.priority_multipliers.get(signal.priority, 1.0)
-        pattern_count = len(signal.patterns)
-        pattern_mult = self.pattern_multipliers.get(pattern_count, 1.0)
-        range_percent = self.base_range * priority_mult * pattern_mult
-        
-        entry_min = current_price * (1 - range_percent)
-        entry_max = current_price * (1 + range_percent * 0.7)
-        
-        if current_price < entry_min:
-            position, position_text = "below", "أقل من النطاق - فرصة أفضل"
-        elif current_price > entry_max:
-            position, position_text = "above", "أعلى من النطاق - انتظر تراجع"
-        else:
-            position, position_text = "inside", "✅ في النطاق المثالي"
-        
-        # استخدام استراتيجية الخروج المثلى
-        take_profits = []
-        for tp in EXIT_STRATEGY['partial_take_profit']:
-            take_profits.append({
-                'percent': tp['percent'],
-                'price': current_price * (1 + tp['percent']/100),
-                'sell_ratio': tp['sell_ratio'] * 100
-            })
-        
-        stop_loss = current_price * (1 + EXIT_STRATEGY['hard_stop_loss']/100)
-        trailing_activation = current_price * (1 + EXIT_STRATEGY['trailing_stop']['activation']/100)
-        
-        return {
-            'current': current_price,
-            'min': entry_min,
-            'max': entry_max,
-            'range_percent': range_percent * 100,
-            'position': position,
-            'position_text': position_text,
-            'take_profits': take_profits,
-            'stop_loss': stop_loss,
-            'trailing_activation': trailing_activation,
-            'trailing_distance': EXIT_STRATEGY['trailing_stop']['distance'],
-            'recommendation': self._get_recommendation(signal, position)
-        }
-    
-    def _get_recommendation(self, signal, position) -> dict:
-        if signal.priority >= 4:
-            if position in ['inside', 'below']:
-                return {'action': '✅ اشترِ الآن - السعر ممتاز', 'allocation': '100%', 'urgency': 'فوري'}
-            else:
-                return {'action': '⚠️ انتظر تراجعاً بسيطاً', 'allocation': '75%', 'urgency': 'انتظار'}
-        elif signal.priority >= 3:
-            if position in ['inside', 'below']:
-                return {'action': '✅ يمكن الشراء مع مراقبة', 'allocation': '75%', 'urgency': 'عادي'}
-            else:
-                return {'action': '⚠️ انتظر تراجعاً', 'allocation': '50%', 'urgency': 'انتظار'}
-        else:
-            return {'action': '👀 راقب فقط - لا تدخل', 'allocation': '0%', 'urgency': 'مراقبة'}
+        self.active_trades = {}
+        self.missed_trades = []
+        self.watchlist = []
+        self.all_opportunities = []
+        self.balance = 2000.0
+        self.stats = {"scanned": 0, "opportunities_found": 0, "last_scan_time": None}
+        self._init_storage()
+        self._load_state_sync()
 
-# =========================================================
-# مدير الصفقات النشطة (مع استراتيجية الخروج المثلى)
-# =========================================================
-class TradeManager:
-    def __init__(self):
-        self.active_trades: Dict[str, ActiveTrade] = {}
-        self.closed_trades: List[dict] = []
-        self.available_capital = TOTAL_CAPITAL
-        self.daily_trades = 0
-        self.daily_pnl = 0.0
-        self.total_trades = 0
-        self.winning_trades = 0
-        
-    def open_trade(self, signal: ExplosionSignal, allocation_ratio: float = 1.0) -> bool:
-        """فتح صفقة جديدة"""
-        symbol = signal.symbol
-        
-        if symbol in self.active_trades:
-            return False
-        
-        if len(self.active_trades) >= MAX_CONCURRENT_TRADES:
-            return False
-        
-        if self.daily_trades >= MAX_TRADES_PER_DAY:
-            return False
-        
-        capital = CAPITAL_PER_TRADE * allocation_ratio
-        if capital > self.available_capital:
-            return False
-        
-        quantity = capital / signal.entry_price
-        self.available_capital -= capital
-        self.daily_trades += 1
-        self.total_trades += 1
-        
-        trade = ActiveTrade(
-            symbol=symbol,
-            entry_price=signal.entry_price,
-            capital=capital,
-            quantity=quantity,
-            remaining_quantity=quantity,
-            entry_time=datetime.now(),
-            highest_price=signal.entry_price,
-            trailing_stop=0,
-            trailing_activated=False,
-            take_profits_hit=[],
-            pattern=signal.patterns[0] if signal.patterns else 'unknown',
-            confidence=signal.confidence
-        )
-        
-        self.active_trades[symbol] = trade
-        return True
-    
-    def update_trade(self, symbol: str, current_price: float) -> Optional[dict]:
-        """تحديث الصفقة وتطبيق استراتيجية الخروج المثلى"""
-        if symbol not in self.active_trades:
-            return None
-        
-        trade = self.active_trades[symbol]
-        
-        # تحديث أعلى سعر
-        if current_price > trade.highest_price:
-            trade.highest_price = current_price
-        
-        # حساب الربح الحالي
-        pnl_pct = (current_price - trade.entry_price) / trade.entry_price * 100
-        
-        # 1. فحص وقف الخسارة الثابت
-        if pnl_pct <= EXIT_STRATEGY['hard_stop_loss']:
-            return self._close_trade(symbol, current_price, pnl_pct, 'hard_stop_loss')
-        
-        # 2. تطبيق جني الأرباح الجزئي
-        for tp in EXIT_STRATEGY['partial_take_profit']:
-            if tp['percent'] not in trade.take_profits_hit and pnl_pct >= tp['percent']:
-                # بيع جزئي
-                sell_quantity = trade.quantity * tp['sell_ratio']
-                trade.remaining_quantity -= sell_quantity
-                trade.take_profits_hit.append(tp['percent'])
-                
-                # إعادة رأس المال + الربح
-                sell_value = sell_quantity * current_price
-                self.available_capital += sell_value
-                
-                print(f"  💰 {symbol}: جني أرباح جزئي +{tp['percent']}% (تم بيع {tp['sell_ratio']*100:.0f}%)")
-                
-                # إذا تم بيع كل الكمية
-                if trade.remaining_quantity <= 0:
-                    return self._close_trade(symbol, current_price, pnl_pct, 'fully_sold')
-        
-        # 3. تطبيق الوقف المتحرك على الكمية المتبقية
-        if trade.remaining_quantity > 0:
-            activation_price = trade.entry_price * (1 + EXIT_STRATEGY['trailing_stop']['activation']/100)
-            
-            if current_price >= activation_price:
-                if not trade.trailing_activated:
-                    trade.trailing_activated = True
-                    trade.trailing_stop = current_price * (1 - EXIT_STRATEGY['trailing_stop']['distance']/100)
-                    print(f"  🔄 {symbol}: تم تفعيل الوقف المتحرك عند +{EXIT_STRATEGY['trailing_stop']['activation']}%")
-                else:
-                    # تحديث الوقف المتحرك (يتحرك للأعلى فقط)
-                    new_stop = current_price * (1 - EXIT_STRATEGY['trailing_stop']['distance']/100)
-                    if new_stop > trade.trailing_stop:
-                        trade.trailing_stop = new_stop
-                
-                # فحص إذا ضرب الوقف المتحرك
-                if trade.trailing_activated and current_price <= trade.trailing_stop:
-                    return self._close_trade(symbol, current_price, pnl_pct, 'trailing_stop')
-        
-        return None
-    
-    def _close_trade(self, symbol: str, price: float, pnl_pct: float, reason: str) -> dict:
-        """إغلاق الصفقة"""
-        trade = self.active_trades[symbol]
-        
-        # بيع الكمية المتبقية
-        if trade.remaining_quantity > 0:
-            sell_value = trade.remaining_quantity * price
-            self.available_capital += sell_value
-        
-        # حساب الربح الإجمالي
-        total_pnl_usd = trade.capital * pnl_pct / 100
-        self.daily_pnl += pnl_pct
-        
-        if pnl_pct > 0:
-            self.winning_trades += 1
-        
-        result = {
-            'symbol': symbol,
-            'entry_price': trade.entry_price,
-            'exit_price': price,
-            'pnl_pct': pnl_pct,
-            'pnl_usd': total_pnl_usd,
-            'entry_time': trade.entry_time,
-            'exit_time': datetime.now(),
-            'pattern': trade.pattern,
-            'confidence': trade.confidence,
-            'exit_reason': reason,
-            'take_profits_hit': trade.take_profits_hit
-        }
-        
-        self.closed_trades.append(result)
-        del self.active_trades[symbol]
-        
-        print(f"  🏁 {symbol}: {pnl_pct:+.2f}% | {reason} | متاح: {self.available_capital:.2f}$")
-        
-        return result
-    
-    def get_win_rate(self) -> float:
-        if self.total_trades == 0:
-            return 0
-        return self.winning_trades / self.total_trades * 100
+    def _init_storage(self):
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("CREATE TABLE IF NOT EXISTS active_trades (symbol TEXT PRIMARY KEY, data TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value REAL)")
+        if not conn.execute("SELECT value FROM config WHERE key='balance'").fetchone():
+            conn.execute("INSERT INTO config VALUES ('balance', 2000.0)")
+        conn.commit()
+        conn.close()
+        for f in [REAL_CSV, MISSED_CSV]:
+            if not os.path.exists(f):
+                with open(f, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(['Time', 'Symbol', 'Entry', 'Exit', 'PNL%'])
+        if not os.path.exists(OPPORTUNITIES_CSV):
+            with open(OPPORTUNITIES_CSV, 'w', encoding='utf-8') as f:
+                f.write("Time,Symbol,Price,EntryPoint,ExpectedPump%,Votes,Score,Reason,Strategies,CandlePatterns,ExtraScores\n")
 
-# =========================================================
-# كاشف الانفجارات
-# =========================================================
-class ExplosionDetector:
-    def __init__(self):
-        self.pattern_weights = PATTERN_WEIGHTS
-        self.recent_signals = deque(maxlen=100)
-        self.last_signal_time = {}
-        
-    async def scan_market(self, exchange) -> List[ExplosionSignal]:
-        print(f"\n{'='*60}")
-        print(f"🔍 مسح السوق - {datetime.now().strftime('%H:%M:%S')}")
-        print(f"{'='*60}")
-        
-        symbols = await self._get_active_symbols(exchange)
-        print(f"📊 جاري فحص {len(symbols)} عملة...")
-        
-        all_signals = []
-        
-        for i in range(0, len(symbols), SCAN_BATCH_SIZE):
-            batch = symbols[i:i+SCAN_BATCH_SIZE]
-            tasks = [self._analyze_symbol(exchange, sym) for sym in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for result in results:
-                if isinstance(result, ExplosionSignal):
-                    if self._should_accept_signal(result):
-                        all_signals.append(result)
-                        self._record_signal(result)
-            
-            progress = min(i + SCAN_BATCH_SIZE, len(symbols))
-            print(f"   📊 تقدم: {progress}/{len(symbols)} ({progress*100//len(symbols)}%)")
-            await asyncio.sleep(0.2)
-        
-        all_signals.sort(key=lambda x: (x.priority, x.confidence), reverse=True)
-        return all_signals
-    
-    async def _get_active_symbols(self, exchange) -> List[str]:
+    def _load_state_sync(self):
+        conn = sqlite3.connect(DB_FILE)
         try:
-            tickers = await exchange.fetch_tickers()
-            active = []
-            
-            for sym, ticker in tickers.items():
-                if not sym.endswith('/USDT'):
-                    continue
-                
-                volume = ticker.get('quoteVolume', 0)
-                if volume < MIN_VOLUME_24H:
-                    continue
-                
-                change = ticker.get('percentage', 0)
-                if change > MAX_PRICE_CHANGE_24H or change < -15:
-                    continue
-                
-                bid = ticker.get('bid', 0)
-                ask = ticker.get('ask', 0)
-                if bid > 0 and ask > 0:
-                    spread = (ask - bid) / bid * 100
-                    if spread > MAX_SPREAD:
-                        continue
-                
-                active.append(sym)
-            
-            active.sort(key=lambda x: tickers[x].get('quoteVolume', 0), reverse=True)
-            return active[:SCAN_SYMBOLS_LIMIT]
+            row = conn.execute("SELECT value FROM config WHERE key='balance'").fetchone()
+            if row:
+                self.balance = row[0]
+            rows = conn.execute("SELECT data FROM active_trades").fetchall()
+            for (data_json,) in rows:
+                d = json.loads(data_json)
+                sig_dict = d.pop('signal')
+                signal = TrainSignal(**sig_dict)
+                trade = TradeInfo(**d, signal=signal)
+                self.active_trades[trade.symbol] = trade
+            print(f"Loaded {len(self.active_trades)} active trades, balance={self.balance}")
         except Exception as e:
-            print(f"⚠️ خطأ في جلب العملات: {e}")
-            return []
-    
-    async def _analyze_symbol(self, exchange, symbol: str) -> Optional[ExplosionSignal]:
-        try:
-            ohlcv_1m = await exchange.fetch_ohlcv(symbol, '1m', limit=60)
-            ohlcv_5m = await exchange.fetch_ohlcv(symbol, '5m', limit=30)
-            ticker = await exchange.fetch_ticker(symbol)
-            
-            if len(ohlcv_1m) < 30 or len(ohlcv_5m) < 20:
-                return None
-            
-            data_1m = np.array(ohlcv_1m)
-            data_5m = np.array(ohlcv_5m)
-            
-            closes_1m = data_1m[:, 4]
-            volumes_1m = data_1m[:, 5]
-            closes_5m = data_5m[:, 4]
-            volumes_5m = data_5m[:, 5]
-            
-            current_price = ticker['last']
-            
-            detected_patterns = []
-            total_confidence = 0
-            time_to_explosion = 0
-            time_weights = 0
-            
-            calm = self._check_calm_before_storm(volumes_5m, closes_5m)
-            if calm['detected'] and 'calm_before_storm' in ALLOWED_PATTERNS:
-                detected_patterns.append(calm['name'])
-                total_confidence += self.pattern_weights['calm_before_storm']
-                time_to_explosion += calm['time_estimate'] * self.pattern_weights['calm_before_storm']
-                time_weights += self.pattern_weights['calm_before_storm']
-            
-            whale = self._check_whale_accumulation(volumes_1m, closes_1m)
-            if whale['detected'] and 'whale_accumulation' in ALLOWED_PATTERNS:
-                detected_patterns.append(whale['name'])
-                total_confidence += self.pattern_weights['whale_accumulation']
-                time_to_explosion += whale['time_estimate'] * self.pattern_weights['whale_accumulation']
-                time_weights += self.pattern_weights['whale_accumulation']
-            
-            boll = self._check_bollinger_squeeze(closes_5m)
-            if boll['detected'] and 'bollinger_squeeze' in ALLOWED_PATTERNS:
-                detected_patterns.append(boll['name'])
-                total_confidence += self.pattern_weights['bollinger_squeeze']
-                time_to_explosion += boll['time_estimate'] * self.pattern_weights['bollinger_squeeze']
-                time_weights += self.pattern_weights['bollinger_squeeze']
-            
-            if total_confidence >= MIN_CONFIDENCE and len(detected_patterns) >= MIN_PATTERNS_REQUIRED:
-                avg_time = int(time_to_explosion / time_weights) if time_weights > 0 else 180
-                expected_move = self._calculate_expected_move(total_confidence, len(detected_patterns))
-                priority = self._calculate_priority(total_confidence, len(detected_patterns), avg_time)
-                
-                return ExplosionSignal(
-                    symbol=symbol,
-                    confidence=min(100, total_confidence),
-                    expected_move=expected_move,
-                    time_to_explosion=avg_time,
-                    entry_price=current_price,
-                    patterns=detected_patterns,
-                    volume_24h=ticker.get('quoteVolume', 0),
-                    current_change=ticker.get('percentage', 0),
-                    priority=priority
-                )
-        except Exception:
-            pass
-        
-        return None
-    
-    def _check_calm_before_storm(self, volumes: np.ndarray, closes: np.ndarray) -> dict:
-        if len(volumes) < 15 or len(closes) < 10:
-            return {'detected': False}
-        recent_vol = np.mean(volumes[-5:])
-        older_vol = np.mean(volumes[-15:-5])
-        vol_ratio = recent_vol / older_vol if older_vol > 0 else 1
-        recent_closes = closes[-8:]
-        price_range = (np.max(recent_closes) - np.min(recent_closes)) / np.mean(recent_closes) * 100
-        if vol_ratio < 0.5 and price_range < 2.0:
-            return {'detected': True, 'name': '🌊 هدوء قبل العاصفة', 'time_estimate': 300}
-        return {'detected': False}
-    
-    def _check_whale_accumulation(self, volumes: np.ndarray, closes: np.ndarray) -> dict:
-        if len(volumes) < 10 or len(closes) < 5:
-            return {'detected': False}
-        current_vol = volumes[-1]
-        avg_vol = np.mean(volumes[-10:])
-        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
-        recent_closes = closes[-5:]
-        price_stability = (np.max(recent_closes) - np.min(recent_closes)) / np.mean(recent_closes) * 100
-        if vol_ratio > 1.5 and price_stability < 1.5:
-            return {'detected': True, 'name': f'🐋 تجميع حيتان ({vol_ratio:.1f}x)', 'time_estimate': 180}
-        return {'detected': False}
-    
-    def _check_bollinger_squeeze(self, closes: np.ndarray) -> dict:
-        if len(closes) < 20:
-            return {'detected': False}
-        recent = closes[-20:]
-        current = closes[-1]
-        middle = np.mean(recent)
-        std = np.std(recent)
-        upper = middle + 2 * std
-        lower = middle - 2 * std
-        bandwidth = (upper - lower) / middle * 100
-        price_position = (current - lower) / (upper - lower) if upper != lower else 0.5
-        if bandwidth < 5.0 and price_position < 0.4:
-            return {'detected': True, 'name': f'🎯 انضغاط بولنجر ({bandwidth:.1f}%)', 'time_estimate': 240}
-        return {'detected': False}
-    
-    def _calculate_expected_move(self, confidence: float, pattern_count: int) -> float:
-        base = 5.0
-        if pattern_count >= 4:
-            base += 5.0
-        elif pattern_count >= 3:
-            base += 3.0
-        elif pattern_count >= 2:
-            base += 1.5
-        if confidence >= 80:
-            base += 2.0
-        elif confidence >= 70:
-            base += 1.0
-        return min(15.0, base)
-    
-    def _calculate_priority(self, confidence: float, pattern_count: int, time_sec: int) -> int:
-        priority = 1
-        if confidence >= 85:
-            priority += 2
-        elif confidence >= 75:
-            priority += 1
-        if pattern_count >= 4:
-            priority += 2
-        elif pattern_count >= 3:
-            priority += 1
-        if time_sec < 120:
-            priority += 1
-        return min(5, priority)
-    
-    def _should_accept_signal(self, signal: ExplosionSignal) -> bool:
-        symbol = signal.symbol
-        now = datetime.now()
-        if symbol in self.last_signal_time:
-            last_time = self.last_signal_time[symbol]
-            if (now - last_time).total_seconds() < 300:
-                return False
-        return True
-    
-    def _record_signal(self, signal: ExplosionSignal):
-        self.recent_signals.append(signal)
-        self.last_signal_time[signal.symbol] = datetime.now()
-
-# =========================================================
-# نظام الإشعارات المحسن
-# =========================================================
-class EnhancedExplosionNotifier:
-    def __init__(self):
-        self.range_calculator = EntryRangeCalculator()
-        self.telegram_token = TELEGRAM_TOKEN
-        self.telegram_chat_id = TELEGRAM_CHAT_ID
-        self.last_summary_time = datetime.now()
-        
-    async def send_explosion_alert(self, signal: ExplosionSignal):
-        range_info = self.range_calculator.calculate(signal)
-        
-        if signal.priority >= 5:
-            priority_emoji = "🔴🔴🔴"
-        elif signal.priority >= 4:
-            priority_emoji = "🔴🔴"
-        elif signal.priority >= 3:
-            priority_emoji = "🔴"
-        elif signal.priority >= 2:
-            priority_emoji = "🟡"
-        else:
-            priority_emoji = "🟢"
-        
-        patterns_msg = "\n".join(f"  • {p}" for p in signal.patterns)
-        range_msg = self._format_entry_range_message(signal, range_info)
-        
-        msg = f"""
-{priority_emoji} *انفجار قادم - أولوية {signal.priority}/5*
-{BOT_TAG}
-
-🪙 *{signal.symbol}*
-💰 السعر الحالي: {signal.entry_price:.8f}
-📊 الثقة: {signal.confidence:.1f}%
-📈 الصعود المتوقع: +{signal.expected_move:.1f}%
-⏱️ الوقت المتوقع: {signal.get_time_estimate()}
-
-📋 *الأنماط المكتشفة:*
-{patterns_msg}
-{range_msg}
-📊 حجم 24h: ${signal.volume_24h:,.0f}
-📈 التغير الحالي: {signal.current_change:+.2f}%
-
-🕐 `{datetime.now().strftime('%H:%M:%S')}`
-"""
-        
-        await self._send_telegram(msg)
-    
-    def _format_entry_range_message(self, signal: ExplosionSignal, range_info: dict) -> str:
-        rec = range_info['recommendation']
-        
-        targets_msg = ""
-        for i, tp in enumerate(range_info['take_profits'], 1):
-            targets_msg += f"   🎯 هدف {i}: +{tp['percent']}% ({tp['price']:.8f}) - بيع {tp['sell_ratio']:.0f}%\n"
-        
-        return f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🎯 *نطاق الدخول المثالي*
-
-📊 *النطاق الآمن:*
-   • الحد الأدنى: {range_info['min']:.8f} (-{range_info['range_percent']:.1f}%)
-   • الحد الأقصى: {range_info['max']:.8f} (+{range_info['range_percent']*0.7:.1f}%)
-   • السعر الحالي: {range_info['current']:.8f} {range_info['position_text']}
-
-💡 *توصية الدخول:*
-   {rec['action']}
-   💰 حجم الصفقة: {rec['allocation']}
-
-📈 *استراتيجية الخروج:*
-{targets_msg}
-   🔄 وقف متحرك: تفعيل +{EXIT_STRATEGY['trailing_stop']['activation']}% | مسافة {EXIT_STRATEGY['trailing_stop']['distance']}%
-   🛑 وقف خسارة: {EXIT_STRATEGY['hard_stop_loss']}% ({range_info['stop_loss']:.8f})
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-    
-    async def send_summary(self, signals: List[ExplosionSignal]):
-        if not signals:
-            return
-        
-        now = datetime.now()
-        if (now - self.last_summary_time).total_seconds() < 1800:  # كل 30 دقيقة
-            return
-        
-        self.last_summary_time = now
-        
-        signals_with_ranges = []
-        for sig in signals[:5]:
-            range_info = self.range_calculator.calculate(sig)
-            signals_with_ranges.append((sig, range_info))
-        
-        msg = f"""
-📊 *أفضل الفرص - مع استراتيجية الخروج*
-{BOT_TAG}
-
-🎯 *فرص ممتازة (أولوية 4-5):*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        
-        excellent = [(s, r) for s, r in signals_with_ranges if s.priority >= 4]
-        for i, (sig, range_info) in enumerate(excellent[:3], 1):
-            rec = range_info['recommendation']
-            msg += f"""
-{i}. 🔴🔴 *{sig.symbol}* - ثقة {sig.confidence:.0f}%
-   💰 {sig.entry_price:.8f} | 🎯 {range_info['min']:.8f} - {range_info['max']:.8f}
-   💡 {rec['action']} ({rec['allocation']})
-"""
-        
-        good = [(s, r) for s, r in signals_with_ranges if s.priority == 3]
-        if good:
-            msg += """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📋 *فرص جيدة (أولوية 3):*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-            for i, (sig, range_info) in enumerate(good[:2], 1):
-                rec = range_info['recommendation']
-                msg += f"""
-{i}. 🔴 *{sig.symbol}* - ثقة {sig.confidence:.0f}%
-   💰 {sig.entry_price:.8f} | 🎯 {range_info['min']:.8f} - {range_info['max']:.8f}
-   💡 {rec['action']} ({rec['allocation']})
-"""
-        
-        msg += f"""
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-⚙️ *استراتيجية الخروج النشطة:*
-   • جني أرباح: {EXIT_STRATEGY['partial_take_profit'][0]['percent']}% ({EXIT_STRATEGY['partial_take_profit'][0]['sell_ratio']*100:.0f}%) | {EXIT_STRATEGY['partial_take_profit'][1]['percent']}% ({EXIT_STRATEGY['partial_take_profit'][1]['sell_ratio']*100:.0f}%)
-   • وقف متحرك: تفعيل {EXIT_STRATEGY['trailing_stop']['activation']}% | مسافة {EXIT_STRATEGY['trailing_stop']['distance']}%
-   • وقف خسارة: {EXIT_STRATEGY['hard_stop_loss']}%
-
-🕐 `{datetime.now().strftime('%H:%M:%S')}`
-"""
-        
-        await self._send_telegram(msg)
-    
-    async def send_startup_message(self):
-        msg = f"""
-🚀 *تم تشغيل نظام اكتشاف الانفجارات*
-{BOT_TAG}
-
-🔍 مسح {SCAN_SYMBOLS_LIMIT} عملة كل {SCAN_INTERVAL} ثانية
-🎯 الحد الأدنى للثقة: {MIN_CONFIDENCE}%
-📊 الأنماط المطلوبة: {MIN_PATTERNS_REQUIRED}
-💰 رأس المال: {TOTAL_CAPITAL}$ ({MAX_TRADES_PER_DAY} صفقات يومياً)
-
-⚙️ *استراتيجية الخروج:*
-   • جني أرباح: {EXIT_STRATEGY['partial_take_profit'][0]['percent']}% ({EXIT_STRATEGY['partial_take_profit'][0]['sell_ratio']*100:.0f}%) | {EXIT_STRATEGY['partial_take_profit'][1]['percent']}% ({EXIT_STRATEGY['partial_take_profit'][1]['sell_ratio']*100:.0f}%)
-   • وقف متحرك: تفعيل {EXIT_STRATEGY['trailing_stop']['activation']}% | مسافة {EXIT_STRATEGY['trailing_stop']['distance']}%
-   • وقف خسارة: {EXIT_STRATEGY['hard_stop_loss']}%
-
-✅ *النظام يعمل بنجاح!*
-
-🕐 `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`
-"""
-        await self._send_telegram(msg)
-    
-    async def send_daily_report(self, trade_manager: TradeManager):
-        win_rate = trade_manager.get_win_rate()
-        net_pnl = trade_manager.available_capital - TOTAL_CAPITAL
-        net_pnl_pct = (net_pnl / TOTAL_CAPITAL) * 100
-        
-        msg = f"""
-📊 *التقرير اليومي*
-{BOT_TAG}
-
-📅 *{datetime.now().strftime('%Y-%m-%d')}*
-
-📈 *إحصائيات اليوم:*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔄 إجمالي الصفقات: {trade_manager.daily_trades}
-✅ الصفقات الرابحة: {trade_manager.winning_trades}
-❌ الصفقات الخاسرة: {trade_manager.daily_trades - trade_manager.winning_trades}
-🎯 نسبة النجاح: {win_rate:.1f}%
-
-💰 *النتائج المالية:*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 صافي الربح: {net_pnl:+.2f}$ ({net_pnl_pct:+.2f}%)
-💵 الرصيد الحالي: {trade_manager.available_capital:.2f}$
-
-⚙️ *استراتيجية الخروج المستخدمة:*
-   • جني أرباح: {EXIT_STRATEGY['partial_take_profit'][0]['percent']}% | {EXIT_STRATEGY['partial_take_profit'][1]['percent']}%
-   • وقف متحرك: {EXIT_STRATEGY['trailing_stop']['activation']}% → {EXIT_STRATEGY['trailing_stop']['distance']}%
-   • وقف خسارة: {EXIT_STRATEGY['hard_stop_loss']}%
-
-🕐 `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`
-"""
-        await self._send_telegram(msg)
-    
-    async def _send_telegram(self, message: str):
-        try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(url, json={
-                    "chat_id": self.telegram_chat_id,
-                    "text": message.strip(),
-                    "parse_mode": "Markdown"
-                })
-        except Exception as e:
-            print(f"⚠️ خطأ تليجرام: {e}")
-
-# =========================================================
-# فلتر السوق
-# =========================================================
-class MarketRegimeFilter:
-    def __init__(self):
-        self.btc_symbol = 'BTC/USDT'
-        self.regime_data = {}
-    
-    async def analyze(self, exchange) -> dict:
-        try:
-            ohlcv = await exchange.fetch_ohlcv(self.btc_symbol, '1h', limit=50)
-            df = pd.DataFrame(ohlcv, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-            closes, highs, lows = df['c'].values, df['h'].values, df['l'].values
-            adx = self._calc_adx(highs, lows, closes)
-            ema20, ema50 = self._ema(closes, 20), self._ema(closes, 50)
-            trend = "bullish" if ema20[-1] > ema50[-1] else "bearish"
-            btc_change_1h = ((closes[-1] - closes[-4]) / closes[-4]) * 100 if len(closes) >= 4 else 0
-            
-            can_trade = adx >= BTC_MIN_ADX and btc_change_1h > BTC_MAX_DROP_1H
-            
-            self.regime_data = {
-                'regime': 'trending_bullish' if trend == 'bullish' else 'trending_bearish',
-                'adx': round(adx, 1),
-                'btc_change_1h': round(btc_change_1h, 2),
-                'can_trade': can_trade,
-                'trend': trend
-            }
-            return self.regime_data
-        except:
-            return {'can_trade': True, 'trend': 'unknown', 'adx': 0, 'btc_change_1h': 0}
-    
-    def _calc_adx(self, h, l, c, p=14):
-        if len(c) < p + 1:
-            return 20
-        tr1, tr2, tr3 = h[1:] - l[1:], np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])
-        tr = np.maximum(np.maximum(tr1, tr2), tr3)
-        atr = np.mean(tr[-p:]) if len(tr) >= p else np.mean(tr)
-        up, down = h[1:] - h[:-1], l[:-1] - l[1:]
-        plus_dm = np.where((up > down) & (up > 0), up, 0)
-        minus_dm = np.where((down > up) & (down > 0), down, 0)
-        plus_di = 100 * np.mean(plus_dm[-p:]) / atr if atr > 0 else 0
-        minus_di = 100 * np.mean(minus_dm[-p:]) / atr if atr > 0 else 0
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
-        return dx
-    
-    def _ema(self, data, p):
-        alpha, ema = 2 / (p + 1), np.zeros_like(data)
-        if len(data) >= p:
-            ema[p - 1] = np.mean(data[:p])
-            for i in range(p, len(data)):
-                ema[i] = data[i] * alpha + ema[i - 1] * (1 - alpha)
-        return ema
-
-# =========================================================
-# تطبيق Flask
-# =========================================================
-app = Flask(__name__)
-engine_instance = None
-
-@app.route('/')
-def dashboard():
-    if not engine_instance:
-        return "Engine not started yet."
-    
-    market = engine_instance.market_regime
-    stats = engine_instance.last_scan_stats
-    tm = engine_instance.trade_manager
-    
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html dir="rtl">
-    <head>
-        <title>نظام اكتشاف الانفجارات - الإصدار المثالي</title>
-        <meta charset="utf-8">
-        <meta http-equiv="refresh" content="30">
-        <style>
-            body { font-family: Arial; background: #1a1a2e; color: #eee; margin: 20px; }
-            .card { background: #16213e; border-radius: 10px; padding: 20px; margin: 10px; }
-            .badge { padding: 5px 10px; border-radius: 20px; }
-            .success { background: #0f9d58; }
-            .warning { background: #f4b400; }
-            .danger { background: #d93025; }
-            h1, h2 { color: #fff; }
-            p { margin: 10px 0; }
-            .strategy-box { background: #0f3460; border-radius: 8px; padding: 15px; margin: 10px 0; }
-        </style>
-    </head>
-    <body>
-        <h1>🚂 نظام اكتشاف الانفجارات - الإعدادات المثلى</h1>
-        <div style="display: flex; flex-wrap: wrap;">
-            <div class="card" style="flex: 1;">
-                <h2>📊 حالة السوق</h2>
-                <p>النظام: <span class="badge {{ 'success' if market.trend == 'bullish' else 'danger' }}">{{ market.trend }}</span></p>
-                <p>ADX: {{ market.adx }}</p>
-                <p>BTC 1h: {{ market.btc_change }}%</p>
-                <p>التداول: {{ '✅ مسموح' if market.can_trade else '❌ ممنوع' }}</p>
-            </div>
-            <div class="card" style="flex: 1;">
-                <h2>💰 حالة الحساب</h2>
-                <p>الرصيد المتاح: ${{ "%.2f"|format(tm.available_capital) }}</p>
-                <p>الصفقات النشطة: {{ tm.active_trades|length }}</p>
-                <p>صفقات اليوم: {{ tm.daily_trades }}/{{ max_daily }}</p>
-                <p>نسبة النجاح: {{ "%.1f"|format(tm.get_win_rate()) }}%</p>
-            </div>
-            <div class="card" style="flex: 1;">
-                <h2>🔍 آخر مسح</h2>
-                <p>العملات: {{ stats.scanned }}</p>
-                <p>الإشارات: {{ stats.signals }}</p>
-                <p>المدة: {{ stats.duration }} ثانية</p>
-                <p>الوقت: {{ stats.time }}</p>
-            </div>
-        </div>
-        <div class="card">
-            <h2>⚙️ استراتيجية الخروج النشطة (الإعدادات المثلى)</h2>
-            <div class="strategy-box">
-                <p>🎯 <strong>جني أرباح جزئي:</strong> +3% (30%) | +5% (30%)</p>
-                <p>🔄 <strong>وقف متحرك:</strong> تفعيل عند +3% | مسافة 2% (يطبق على 40% المتبقية)</p>
-                <p>🛑 <strong>وقف خسارة ثابت:</strong> -2.5%</p>
-                <p>✅ <strong>النتيجة المتوقعة:</strong> ربح +4.28% لكل صفقة | نجاح 82%</p>
-            </div>
-        </div>
-        <p style="text-align: center; opacity: 0.7;">آخر تحديث: {{ now }}</p>
-    </body>
-    </html>
-    ''',
-    market=market,
-    stats=stats,
-    tm=tm,
-    max_daily=MAX_TRADES_PER_DAY,
-    now=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-@app.route('/health')
-def health():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
-
-# =========================================================
-# المحرك الرئيسي
-# =========================================================
-class ExplosionScannerEngine:
-    def __init__(self):
-        self.detector = ExplosionDetector()
-        self.notifier = EnhancedExplosionNotifier()
-        self.market_filter = MarketRegimeFilter()
-        self.trade_manager = TradeManager()
-        self.scan_count = 0
-        self.total_signals = 0
-        self.market_regime = {}
-        self.last_scan_stats = {'scanned': 0, 'signals': 0, 'duration': 0, 'time': '-'}
-        self.last_daily_report = datetime.now()
-        
-    async def run(self):
-        global engine_instance
-        engine_instance = self
-        
-        print("""
-╔══════════════════════════════════════════════════════════╗
-║                                                          ║
-║     💥 نظام اكتشاف الانفجارات - الإعدادات المثلى 💥      ║
-║                                                          ║
-║     • استراتيجية خروج متكاملة (جني أرباح + وقف متحرك)    ║
-║     • نطاق دخول مثالي لكل إشارة                         ║
-║     • إشعارات تليجرام متقدمة                            ║
-║     • إدارة صفقات ذكية                                   ║
-║                                                          ║
-╚══════════════════════════════════════════════════════════╝
-        """)
-        
-        exchange = ccxt_async.gateio({'enableRateLimit': True, 'rateLimit': 100})
-        
-        await self.notifier.send_startup_message()
-        
-        try:
-            while True:
-                self.scan_count += 1
-                start_time = time.time()
-                
-                self.market_regime = await self.market_filter.analyze(exchange)
-                
-                # تحديث الصفقات النشطة
-                if self.trade_manager.active_trades:
-                    for symbol in list(self.trade_manager.active_trades.keys()):
-                        try:
-                            ticker = await exchange.fetch_ticker(symbol)
-                            result = self.trade_manager.update_trade(symbol, ticker['last'])
-                            if result:
-                                print(f"  🏁 {symbol}: {result['pnl_pct']:+.2f}% | {result['exit_reason']}")
-                        except Exception as e:
-                            print(f"  ⚠️ خطأ في تحديث {symbol}: {e}")
-                
-                # مسح السوق
-                if self.market_regime.get('can_trade', True):
-                    signals = await self.detector.scan_market(exchange)
-                    
-                    if signals:
-                        print(f"\n🎯 تم اكتشاف {len(signals)} عملة مرشحة للانفجار!")
-                        
-                        # فتح صفقات للإشارات القوية
-                        available_slots = MAX_CONCURRENT_TRADES - len(self.trade_manager.active_trades)
-                        for signal in signals[:available_slots]:
-                            if signal.priority >= 3:
-                                # تحديد نسبة التخصيص
-                                if signal.priority >= 4:
-                                    allocation = 1.0
-                                elif signal.priority >= 3:
-                                    allocation = 0.75
-                                else:
-                                    allocation = 0.5
-                                
-                                if self.trade_manager.open_trade(signal, allocation):
-                                    await self.notifier.send_explosion_alert(signal)
-                                    self.total_signals += 1
-                                    await asyncio.sleep(1)
-                        
-                        await self.notifier.send_summary(signals)
-                    else:
-                        print("\n⚪ لا توجد عملات مرشحة للانفجار حالياً")
-                else:
-                    print(f"\n⚠️ التداول متوقف: ADX={self.market_regime.get('adx', 0)}, BTC={self.market_regime.get('btc_change_1h', 0):+.2f}%")
-                
-                elapsed = time.time() - start_time
-                self.last_scan_stats = {
-                    'scanned': SCAN_SYMBOLS_LIMIT,
-                    'signals': len(signals) if 'signals' in locals() else 0,
-                    'duration': round(elapsed, 2),
-                    'time': datetime.now().strftime('%H:%M:%S')
-                }
-                
-                # تقرير يومي
-                now = datetime.now()
-                if now.hour == 23 and now.minute >= 55 and (now - self.last_daily_report).total_seconds() > 3600:
-                    await self.notifier.send_daily_report(self.trade_manager)
-                    self.last_daily_report = now
-                
-                print(f"\n📊 دورة #{self.scan_count} | ⏱️ {elapsed:.1f} ثانية | الصفقات النشطة: {len(self.trade_manager.active_trades)}")
-                print(f"{'='*60}")
-                
-                await asyncio.sleep(SCAN_INTERVAL)
-                
-        except KeyboardInterrupt:
-            print("\n⏹️ إيقاف النظام...")
-            await self.notifier.send_daily_report(self.trade_manager)
+            print(f"Load state error: {e}")
         finally:
-            await exchange.close()
+            conn.close()
 
-def start_flask():
-    init_database()
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    async def _save_state(self):
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute("DELETE FROM active_trades")
+            for sym, trade in self.active_trades.items():
+                data = asdict(trade)
+                data['signal'] = asdict(trade.signal)
+                conn.execute("INSERT INTO active_trades VALUES (?, ?)", (sym, json.dumps(data)))
+            conn.execute("UPDATE config SET value = ? WHERE key = 'balance'", (self.balance,))
+            conn.commit()
+        except Exception as e:
+            print(f"Save state error: {e}")
+        finally:
+            conn.close()
 
+    async def log_opportunity(self, symbol, price, entry_point, expected_pump, votes, score, reason, strategies, candle_patterns=None, extra_scores=None):
+        async with aiofiles.open(OPPORTUNITIES_CSV, 'a', encoding='utf-8') as f:
+            line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{symbol},{price},{entry_point},{expected_pump},{votes},{score:.2f},{reason},{'|'.join(strategies)},{'|'.join(candle_patterns) if candle_patterns else ''},{json.dumps(extra_scores or {})}"
+            await f.write(line + "\n")
+
+    # ---------- فلتر الانفجار السريع ----------
+    async def explosion_filter(self, df):
+        if len(df) < 30:
+            return False, []
+        avg_volume = df['v'].rolling(20).mean().iloc[-2]
+        current_volume = df['v'].iloc[-1]
+        volume_ok = (current_volume > avg_volume * 1.5) if avg_volume > 0 else False
+        price_change_3 = (df['c'].iloc[-1] - df['c'].iloc[-4]) / df['c'].iloc[-4] * 100
+        momentum_ok = price_change_3 > 1.0
+        sma = df['c'].rolling(20).mean()
+        std = df['c'].rolling(20).std()
+        upper_bb = sma + (1.5 * std)
+        bb_break_ok = df['c'].iloc[-1] > upper_bb.iloc[-1]
+        lower_bb = sma - (2 * std)
+        bw = (upper_bb - lower_bb) / sma
+        squeeze_ok = bw.iloc[-1] < 0.07
+        delta = df['c'].diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi = 100 - (100 / (1 + gain / (loss + 1e-9)))
+        rsi_val = rsi.iloc[-1]
+        rsi_increasing = rsi.iloc[-1] > rsi.iloc[-2] > rsi.iloc[-3]
+        rsi_ok = rsi_val > 50 or rsi_increasing
+        conditions = []
+        if volume_ok: conditions.append("VolumeSpike")
+        if momentum_ok: conditions.append("Momentum3")
+        if bb_break_ok: conditions.append("BBBreak")
+        if squeeze_ok: conditions.append("Squeeze")
+        if rsi_ok: conditions.append("RSI_Dynamic")
+        passed = len(conditions) >= EXPLOSION_FILTER_MIN_CONDITIONS
+        return passed, conditions
+
+    # ---------- أنماط الشموع اليابانية ----------
+    def detect_candlestick_patterns(self, df):
+        if len(df) < 30:
+            return 0, 0, [], False
+        bullish_score = 0
+        bearish_score = 0
+        patterns = []
+        is_exit = False
+        avg_volume = df['v'].rolling(20).mean().iloc[-1]
+        if avg_volume == 0:
+            avg_volume = df['v'].iloc[-1]
+        # Three Line Strike
+        if len(df) >= 4:
+            last_4 = df.iloc[-4:]
+            if (all(last_4['c'].iloc[i] < last_4['c'].iloc[i-1] for i in range(1, 4)) and
+                last_4['c'].iloc[-1] > last_4['h'].iloc[-2] and
+                last_4['c'].iloc[-1] > last_4['o'].iloc[-1] and
+                df['v'].iloc[-1] > avg_volume * 1.5):
+                bullish_score += 25
+                patterns.append("ThreeLineStrike")
+        # Hammer
+        body = abs(df['c'].iloc[-1] - df['o'].iloc[-1])
+        lower_wick = min(df['o'].iloc[-1], df['c'].iloc[-1]) - df['l'].iloc[-1]
+        upper_wick = df['h'].iloc[-1] - max(df['o'].iloc[-1], df['c'].iloc[-1])
+        if body > 0 and lower_wick > body * 2 and upper_wick < body * 0.5:
+            if df['v'].iloc[-1] > avg_volume * 1.2:
+                bullish_score += 15
+                patterns.append("Hammer")
+        # Bullish Engulfing
+        if len(df) >= 2:
+            if (df['c'].iloc[-1] > df['o'].iloc[-1] and 
+                df['o'].iloc[-1] < df['c'].iloc[-2] and 
+                df['c'].iloc[-1] > df['o'].iloc[-2] and
+                df['v'].iloc[-1] > avg_volume * 1.3):
+                bullish_score += 15
+                patterns.append("BullishEngulfing")
+        # Morning Star
+        if len(df) >= 3:
+            last_3 = df.iloc[-3:]
+            if (last_3['c'].iloc[-3] < last_3['o'].iloc[-3] and
+                abs(last_3['c'].iloc[-2] - last_3['o'].iloc[-2]) < abs(last_3['c'].iloc[-3] - last_3['o'].iloc[-3]) * 0.3 and
+                last_3['c'].iloc[-1] > last_3['o'].iloc[-1] and
+                last_3['c'].iloc[-1] > (last_3['h'].iloc[-3] + last_3['l'].iloc[-3]) / 2 and
+                df['v'].iloc[-1] > avg_volume * 1.2):
+                bullish_score += 18
+                patterns.append("MorningStar")
+        # Piercing Line
+        if len(df) >= 2:
+            if (df['c'].iloc[-2] < df['o'].iloc[-2] and
+                df['c'].iloc[-1] > df['o'].iloc[-1] and
+                df['o'].iloc[-1] < df['c'].iloc[-2] and
+                df['c'].iloc[-1] > (df['c'].iloc[-2] + df['o'].iloc[-2]) / 2 and
+                df['v'].iloc[-1] > avg_volume * 1.2):
+                bullish_score += 12
+                patterns.append("PiercingLine")
+        # Three Black Crows
+        if len(df) >= 3:
+            last_3 = df.iloc[-3:]
+            if (all(last_3['c'].iloc[i] < last_3['c'].iloc[i-1] for i in range(1, 3)) and
+                all(last_3['h'].iloc[i] - last_3['l'].iloc[i] > (df['h'].iloc[-5] - df['l'].iloc[-5]) * 0.7 for i in range(3))):
+                bearish_score += 20
+                patterns.append("ThreeBlackCrows")
+                is_exit = True
+        # Evening Star
+        if len(df) >= 3:
+            last_3 = df.iloc[-3:]
+            if (last_3['c'].iloc[-3] > last_3['o'].iloc[-3] and
+                abs(last_3['c'].iloc[-2] - last_3['o'].iloc[-2]) < abs(last_3['c'].iloc[-3] - last_3['o'].iloc[-3]) * 0.3 and
+                last_3['c'].iloc[-1] < last_3['o'].iloc[-1] and
+                last_3['c'].iloc[-1] < (last_3['l'].iloc[-3] + last_3['h'].iloc[-3]) / 2):
+                bearish_score += 15
+                patterns.append("EveningStar")
+                is_exit = True
+        # Shooting Star
+        if body > 0 and upper_wick > body * 2 and lower_wick < body * 0.5:
+            bearish_score += 12
+            patterns.append("ShootingStar")
+            is_exit = True
+        return bullish_score, bearish_score, patterns, is_exit
+
+    async def get_market_condition_score(self, ex, symbol):
+        try:
+            ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=30)
+            ohlcv_1h = await ex.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+            if len(ohlcv_15) < 30 or len(ohlcv_1h) < 50:
+                return 0, "Insufficient data"
+            df_15 = pd.DataFrame(ohlcv_15, columns=['t','o','h','l','c','v'])
+            df_1h = pd.DataFrame(ohlcv_1h, columns=['t','o','h','l','c','v'])
+            price_15 = df_15['c'].iloc[-1]
+            ema50_15 = df_15['c'].ewm(span=50).mean().iloc[-1]
+            ema50_1h = df_1h['c'].ewm(span=50).mean().iloc[-1]
+            ema200_1h = df_1h['c'].ewm(span=200).mean().iloc[-1]
+            if price_15 > ema50_15 and ema50_1h > ema200_1h:
+                return 15, "Strong Uptrend"
+            elif price_15 > ema50_15:
+                return 5, "Weak Uptrend"
+            elif price_15 < ema50_15:
+                return -15, "Downtrend"
+            else:
+                return -5, "Sideways"
+        except:
+            return 0, "Error"
+
+    async def get_golden_cross_score(self, ex, symbol):
+        try:
+            ohlcv_4h = await ex.fetch_ohlcv(symbol, timeframe='4h', limit=100)
+            if len(ohlcv_4h) < 50:
+                return 0, None
+            df = pd.DataFrame(ohlcv_4h, columns=['t','o','h','l','c','v'])
+            ema50 = df['c'].ewm(span=50).mean()
+            ema200 = df['c'].ewm(span=200).mean()
+            for i in range(-3, 0):
+                if ema50.iloc[i] > ema200.iloc[i] and ema50.iloc[i-1] <= ema200.iloc[i-1]:
+                    return 10, "Golden Cross (4h)"
+            return 0, None
+        except:
+            return 0, None
+
+    async def analyze(self, ex, symbol):
+        reason = None
+        try:
+            if ENABLE_TIME_FILTER:
+                now_utc = datetime.utcnow().time()
+                if not (time(TIME_FILTER_START,0) <= now_utc <= time(TIME_FILTER_END,0)):
+                    reason = "وقت غير مناسب"
+                    return None, reason
+
+            ohlcv_15 = await ex.fetch_ohlcv(symbol, timeframe='15m', limit=30)
+            if len(ohlcv_15) < 30:
+                reason = "بيانات 15 دقيقة غير كافية"
+                return None, reason
+            df_15 = pd.DataFrame(ohlcv_15, columns=['t','o','h','l','c','v'])
+            ema50_15 = df_15['c'].ewm(span=50).mean().iloc[-1]
+            if df_15['c'].iloc[-1] < ema50_15:
+                reason = "اتجاه هابط"
+                return None, reason
+
+            ohlcv = await ex.fetch_ohlcv(symbol, timeframe='5m', limit=100)
+            if len(ohlcv) < 60:
+                reason = "بيانات 5 دقائق غير كافية"
+                return None, reason
+            df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+
+            if ENABLE_EXPLOSION_FILTER:
+                passed, _ = await self.explosion_filter(df)
+                if not passed:
+                    reason = "فلتر الانفجار"
+                    return None, reason
+
+            ticker = await ex.fetch_ticker(symbol)
+            vol_24h = ticker['quoteVolume'] if 'quoteVolume' in ticker else ticker['volume'] * ticker['last']
+            spread = (ticker['ask'] - ticker['bid']) / ticker['last'] * 100 if ticker['ask'] and ticker['bid'] else 100
+            if vol_24h < MIN_24H_VOLUME_USD:
+                reason = "حجم منخفض"
+                return None, reason
+            if spread > MAX_SPREAD_PCT:
+                reason = "سبريد عالٍ"
+                return None, reason
+
+            sma = df['c'].rolling(20).mean()
+            std = df['c'].rolling(20).std()
+            upper_bb = sma + (2 * std)
+            lower_bb = sma - (2 * std)
+            bw = (upper_bb - lower_bb) / sma
+
+            delta = df['c'].diff()
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi = 100 - (100 / (1 + gain / (loss + 1e-9)))
+            rsi_val = rsi.iloc[-1]
+            if rsi_val < 25 or rsi_val > 88:
+                reason = "RSI مشبع"
+                return None, reason
+
+            atr = (df['h'].rolling(14).max() - df['l'].rolling(14).min()) / 14
+            volatility = atr.iloc[-1] / df['c'].iloc[-1] * 100
+            if volatility > 6.0:
+                reason = "تقلب عالي"
+                return None, reason
+
+            exp1 = df['c'].ewm(span=12).mean()
+            exp2 = df['c'].ewm(span=26).mean()
+            macd = exp1 - exp2
+            macd_signal = macd.ewm(span=9).mean()
+            macd_hist = macd - macd_signal
+            macd_bullish = macd.iloc[-1] > macd_signal.iloc[-1] and macd_hist.iloc[-1] > macd_hist.iloc[-2]
+
+            divergence = None
+            if len(df) >= 20:
+                price_lows = []
+                rsi_lows = []
+                for i in range(-20, -1):
+                    if df['c'].iloc[i] <= df['c'].iloc[i-1] and df['c'].iloc[i] <= df['c'].iloc[i+1]:
+                        price_lows.append(df['c'].iloc[i])
+                    if rsi.iloc[i] <= rsi.iloc[i-1] and rsi.iloc[i] <= rsi.iloc[i+1]:
+                        rsi_lows.append(rsi.iloc[i])
+                if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+                    if price_lows[-1] < price_lows[-2] and rsi_lows[-1] > rsi_lows[-2]:
+                        divergence = "bullish"
+                    elif price_lows[-1] > price_lows[-2] and rsi_lows[-1] < rsi_lows[-2]:
+                        divergence = "bearish"
+
+            market_score, _ = await self.get_market_condition_score(ex, symbol)
+            golden_score, _ = await self.get_golden_cross_score(ex, symbol)
+
+            avg_volume = df['v'].rolling(20).mean().iloc[-2]
+            volume_ratio = df['v'].iloc[-1] / avg_volume if avg_volume > 0 else 1
+
+            votes = []
+            if bw.iloc[-1] < bw.rolling(30).min().iloc[-2] * 1.2:
+                votes.append("Squeeze")
+            if df['c'].iloc[-1] > sma.iloc[-1]:
+                votes.append("Uptrend")
+            if volume_ratio > 1.8:
+                votes.append("Volume")
+            if rsi_val > 52:
+                votes.append("Momentum")
+            if df['c'].iloc[-1] > upper_bb.iloc[-1]:
+                votes.append("Breakout")
+            if macd_bullish:
+                votes.append("MACD")
+            if divergence == "bullish":
+                votes.append("BullishDivergence")
+
+            base_score = len(votes) * 10
+            rsi_score = max(0, (rsi_val - 50) / 6) if rsi_val > 50 else 0
+            volume_score = min(volume_ratio * 4, 12)
+            bw_score = max(0, (0.5 - bw.iloc[-1]) * 15) if bw.iloc[-1] < 0.5 else 0
+            liquidity_score = 10 if vol_24h > 200_000_000 else (7 if vol_24h > 50_000_000 else (3 if vol_24h > 5_000_000 else 0))
+            spread_score = 8 if spread < 0.08 else 0
+            volume_spike_score = 15 if volume_ratio >= 5 else (10 if volume_ratio >= 3 else (5 if volume_ratio >= 1.8 else 0))
+
+            total_score = base_score + rsi_score + volume_score + bw_score + liquidity_score + spread_score + volume_spike_score + market_score + (golden_score or 0)
+            if divergence == "bullish":
+                total_score += 15
+            total_score = round(total_score, 2)
+
+            candle_bullish, candle_bearish, candle_patterns, _ = self.detect_candlestick_patterns(df)
+            if candle_bearish >= 15:
+                reason = "نمط هابط"
+                return None, reason
+            total_score += candle_bullish
+
+            expected_pump = (volume_ratio * 1.2) + (bw.iloc[-1] * 40) + (rsi_val / 25)
+            expected_pump = min(expected_pump, 12.0)
+
+            ask_price = ticker['ask'] if ticker['ask'] else df['c'].iloc[-1] * (1 + spread/100)
+            entry_point = ask_price
+
+            if len(votes) >= MIN_VOTES:
+                extra_scores = {
+                    'base': base_score, 'rsi': round(rsi_score,2), 'volume': volume_score,
+                    'bw': round(bw_score,2), 'liquidity': liquidity_score, 'spread': spread_score,
+                    'spike': volume_spike_score, 'market': market_score, 'golden': golden_score or 0,
+                    'divergence': 15 if divergence == 'bullish' else 0,
+                    'candle_bullish': candle_bullish
+                }
+                signal = TrainSignal(
+                    symbol=symbol,
+                    entry_price=df['c'].iloc[-1],
+                    expected_pump_pct=round(expected_pump, 2),
+                    votes=len(votes),
+                    strategies=votes,
+                    score=total_score,
+                    candle_patterns=candle_patterns,
+                    entry_point=round(entry_point, 8),
+                    extra_scores=extra_scores
+                )
+                return signal, None
+            else:
+                reason = f"أصوات غير كافية ({len(votes)}/{MIN_VOTES})"
+                return None, reason
+        except Exception as e:
+            reason = f"خطأ: {str(e)[:50]}"
+            return None, reason
+
+    async def update_trades(self, ex):
+        for sym, trade in list(self.active_trades.items()):
+            try:
+                ticker = await ex.fetch_ticker(sym)
+                curr = ticker['last']
+                pnl = (curr - trade.entry_price) / trade.entry_price * 100
+                if curr > trade.highest_price:
+                    trade.highest_price = curr
+
+                if not trade.partial_closed and pnl >= PARTIAL_TP_PCT:
+                    close_amount = trade.invested * PARTIAL_CLOSE_RATIO
+                    profit_partial = close_amount * (pnl / 100)
+                    self.balance += close_amount + profit_partial
+                    trade.invested -= close_amount
+                    trade.partial_closed = True
+                    await send_tg(f"📊 *جني أرباح جزئي {sym}*\nالربح: {pnl:.2f}% | المتبقي: {trade.invested:.2f} USDT")
+                    await self._save_state()
+
+                if pnl >= TRAILING_ACTIVATE_PCT:
+                    new_stop = trade.entry_price * (1 + (pnl - TRAILING_DISTANCE_PCT)/100)
+                    if new_stop > trade.stop_loss:
+                        trade.stop_loss = new_stop
+
+                exit_reason = None
+                if pnl <= -STOP_LOSS_PCT * 100:
+                    exit_reason = "Stop Loss"
+                elif trade.partial_closed and pnl <= (TRAILING_ACTIVATE_PCT - 1):
+                    exit_reason = "Trailing Stop (remainder)"
+                elif pnl >= FINAL_TP_PCT:
+                    exit_reason = "Final Take Profit"
+                elif curr <= trade.stop_loss and trade.stop_loss > trade.entry_price:
+                    exit_reason = "Trailing Stop"
+
+                if exit_reason:
+                    total_pnl = (curr - trade.entry_price) / trade.entry_price * 100
+                    self.balance += trade.invested * (1 + total_pnl/100)
+                    await self._save_state()
+                    async with aiofiles.open(REAL_CSV, 'a') as f:
+                        await f.write(f"{datetime.now().isoformat()},{sym},{trade.entry_price},{curr},{total_pnl:.2f}\n")
+                    await send_tg(f"🏁 *إغلاق {sym}*\nالربح: `{total_pnl:.2f}%`\nالسبب: {exit_reason}\nالرصيد: {self.balance:.2f} USDT")
+                    del self.active_trades[sym]
+                    await self._save_state()
+            except Exception as e:
+                print(f"Update trade error: {e}")
+
+# =========================================================
+# دوال تلغرام
+# =========================================================
+async def send_tg(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+    except:
+        pass
+
+async def send_document(file_path, caption):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+    try:
+        async with httpx.AsyncClient() as client:
+            with open(file_path, 'rb') as f:
+                files = {'document': f}
+                data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption}
+                await client.post(url, data=data, files=files)
+    except Exception as e:
+        print(f"Send doc error: {e}")
+
+async def handle_telegram_commands():
+    last_update_id = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url)
+                data = resp.json()
+                if data['ok']:
+                    for update in data['result']:
+                        last_update_id = update['update_id']
+                        if 'message' in update and 'text' in update['message']:
+                            text = update['message']['text'].strip()
+                            if text == '/start':
+                                await send_tg("مرحباً! البوت V32 (نهائي) - إرسال CSV تلقائي كل ساعة\nالأوامر:\n/download_real\n/download_missed\n/download_opp\n/status")
+                            elif text == '/download_real':
+                                if os.path.exists(REAL_CSV):
+                                    await send_document(REAL_CSV, "سجل الصفقات الحقيقية")
+                                else:
+                                    await send_tg("⚠️ الملف غير موجود.")
+                            elif text == '/download_missed':
+                                if os.path.exists(MISSED_CSV):
+                                    await send_document(MISSED_CSV, "الفرص الضائعة")
+                                else:
+                                    await send_tg("⚠️ الملف غير موجود.")
+                            elif text == '/download_opp':
+                                if os.path.exists(OPPORTUNITIES_CSV):
+                                    await send_document(OPPORTUNITIES_CSV, "سجل كل الفرص")
+                                else:
+                                    await send_tg("⚠️ الملف غير موجود.")
+                            elif text == '/status':
+                                await send_tg(f"📈 الحالة\nالرصيد: {engine.balance:.2f} USDT\nصفقات مفتوحة: {len(engine.active_trades)}/{MAX_CONCURRENT_TRADES}")
+        except:
+            pass
+        await asyncio.sleep(2)
+
+# =========================================================
+# مهمة الإرسال التلقائي لـ CSV
+# =========================================================
+async def auto_send_csv_periodically():
+    """إرسال ملف CSV تلقائياً كل AUTO_SEND_INTERVAL_HOURS ساعة"""
+    if not AUTO_SEND_CSV:
+        return
+    await asyncio.sleep(60)  # تأخير البداية لتجنب الإرسال فور التشغيل
+    while True:
+        try:
+            if os.path.exists(AUTO_SEND_FILE):
+                await send_document(AUTO_SEND_FILE, AUTO_SEND_CAPTION)
+                print(f"[{datetime.now()}] Auto-sent {AUTO_SEND_FILE}")
+            else:
+                print(f"[{datetime.now()}] File {AUTO_SEND_FILE} not found")
+        except Exception as e:
+            print(f"Auto-send error: {e}")
+        await asyncio.sleep(AUTO_SEND_INTERVAL_HOURS * 3600)
+
+# =========================================================
+# حلقة التداول الرئيسية (مع فلتر الرموز)
+# =========================================================
+async def main_loop():
+    global engine
+    ex = ccxt_async.gateio({'enableRateLimit': True})
+    await send_tg("🚀 Empire V32 (نهائي) بدأ - إرسال CSV تلقائي كل ساعة")
+    
+    # جلب جميع الرموز وتصفيتها
+    markets = await ex.fetch_markets()
+    raw_symbols = [m for m in markets if m['symbol'].endswith('/USDT') and m['active']]
+    symbols = []
+    
+    for market in raw_symbols:
+        base = market['base']
+        if EXCLUDE_STABLECOINS and base in STABLECOINS:
+            continue
+        try:
+            ticker = await ex.fetch_ticker(market['symbol'])
+            vol_24h = ticker['quoteVolume'] if 'quoteVolume' in ticker else ticker['volume'] * ticker['last']
+            price = ticker['last']
+            if EXCLUDE_VERY_LARGE_CAP and vol_24h > MAX_24H_VOLUME_USD_FILTER:
+                continue
+            if price < MIN_PRICE_USD or price > MAX_PRICE_USD:
+                continue
+            symbols.append(market['symbol'])
+        except:
+            continue
+    
+    symbols = symbols[:TOTAL_SYMBOLS_TO_SCAN]
+    await send_tg(f"📊 {len(symbols)} عملة مؤهلة للمسح (بعد استبعاد المستقرة والكبيرة)")
+    
+    while True:
+        try:
+            scan_start = datetime.now()
+            engine.stats["scanned"] = 0
+            engine.stats["opportunities_found"] = 0
+            random_symbols = np.random.choice(symbols, min(len(symbols), TOTAL_SYMBOLS_TO_SCAN), replace=False)
+            all_signals = []
+            
+            for i in range(0, len(random_symbols), BATCH_SIZE):
+                batch = random_symbols[i:i+BATCH_SIZE]
+                tasks = [engine.analyze(ex, s) for s in batch]
+                results = await asyncio.gather(*tasks)
+                for (sig, reason), symbol in zip(results, batch):
+                    if sig:
+                        all_signals.append(sig)
+                        engine.stats["opportunities_found"] += 1
+                        await engine.log_opportunity(sig.symbol, sig.entry_price, sig.entry_point, sig.expected_pump_pct,
+                                                     sig.votes, sig.score, "إشارة قوية", sig.strategies, sig.candle_patterns, sig.extra_scores)
+                        engine.all_opportunities.append(sig)
+                    else:
+                        dummy = TrainSignal(symbol=symbol, entry_price=0, expected_pump_pct=0, votes=0,
+                                            strategies=[], score=0, reason=reason or "لا توجد إشارة", entry_point=0)
+                        engine.all_opportunities.append(dummy)
+                        await engine.log_opportunity(symbol, 0, 0, 0, 0, 0, reason or "لا توجد إشارة", [], [], {})
+                        if len(engine.all_opportunities) > 500:
+                            engine.all_opportunities = engine.all_opportunities[-500:]
+                engine.stats["scanned"] += len(batch)
+                await asyncio.sleep(0.1)
+            
+            all_signals.sort(key=lambda x: x.score, reverse=True)
+            if all_signals:
+                best = all_signals[0]
+                await send_tg(f"🏆 أفضل عملة: {best.symbol} | سكور {best.score} | ارتفاع متوقع {best.expected_pump_pct}%")
+                if best.symbol not in engine.active_trades:
+                    risk_amount = engine.balance * RISK_PER_TRADE
+                    position_size = risk_amount / STOP_LOSS_PCT
+                    invest = min(position_size, engine.balance)
+                    if len(engine.active_trades) < MAX_CONCURRENT_TRADES and engine.balance >= invest:
+                        stop_loss_price = best.entry_point * (1 - STOP_LOSS_PCT)
+                        take_profit_price = best.entry_point * (1 + FINAL_TP_PCT/100)
+                        trade = TradeInfo(
+                            symbol=best.symbol,
+                            signal=best,
+                            entry_price=best.entry_point,
+                            invested=invest,
+                            highest_price=best.entry_point,
+                            stop_loss=stop_loss_price,
+                            take_profit=take_profit_price,
+                            partial_closed=False
+                        )
+                        engine.active_trades[best.symbol] = trade
+                        engine.balance -= invest
+                        await engine._save_state()
+                        await send_tg(f"🟢 شراء {best.symbol} بمبلغ {invest:.2f} USDT")
+                        await engine.log_opportunity(best.symbol, best.entry_price, best.entry_point, best.expected_pump_pct,
+                                                     best.votes, best.score, "✅ تم الدخول", best.strategies, best.candle_patterns, best.extra_scores)
+                    else:
+                        await send_tg(f"⚠️ لا يمكن شراء {best.symbol}: حد الصفقات ({len(engine.active_trades)}/{MAX_CONCURRENT_TRADES}) أو رصيد غير كافٍ.")
+            
+            await engine.update_trades(ex)
+            engine.stats["last_scan_time"] = scan_start.strftime("%H:%M:%S")
+        except Exception as e:
+            print("Main loop error:", e)
+            await send_tg(f"⚠️ خطأ: {str(e)[:100]}")
+            await asyncio.sleep(5)
+        await asyncio.sleep(SCAN_INTERVAL)
+
+# =========================================================
+# تشغيل البوت
+# =========================================================
 async def main():
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
-    engine = ExplosionScannerEngine()
-    await engine.run()
+    global engine
+    engine = EmpireEngineV32()
+    asyncio.create_task(handle_telegram_commands())
+    asyncio.create_task(auto_send_csv_periodically())   # إرسال CSV تلقائي
+    await main_loop()
 
 if __name__ == "__main__":
     asyncio.run(main())
