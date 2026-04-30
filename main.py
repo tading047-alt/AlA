@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""تحليل البيانات وإرسال النتائج إلى Telegram (رسالة + PDF)"""
+"""تحليل البيانات وإرسال النتائج إلى Telegram (مع fpdf2)"""
 
 import pandas as pd
 import sqlite3
 import os
 import requests
 from datetime import datetime
-from fpdf import FPDF
+from fpdf import FPDF  # fpdf2 تستخدم نفس الاسم FPDF
 import json
 
 print("="*60)
@@ -17,8 +17,8 @@ print("="*60)
 # بيانات Telegram (أدخل بياناتك هنا)
 # ============================================
 
-TELEGRAM_BOT_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"  # ⚠️ ضع توكن البوت هنا
-TELEGRAM_CHAT_ID = "5067771509"      # ⚠️ ضع معرف المحادثة هنا
+TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ضع توكن البوت هنا
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"      # ضع معرف المحادثة هنا
 
 # ============================================
 # 1. تحديد مسار المجلد
@@ -41,11 +41,9 @@ def create_sample_files(path):
     csv_file = os.path.join(path, 'sales_q2.csv')
     excel_file = os.path.join(path, 'sales_q3.xlsx')
     
-    files_created = []
-    
     # إنشاء قاعدة البيانات
     if not os.path.exists(db_file):
-        print("\n📝 إنشاء ملف قاعدة البيانات (الربع الأول)...")
+        print("\n📝 إنشاء ملف قاعدة البيانات...")
         conn = sqlite3.connect(db_file)
         q1_data = pd.DataFrame({
             'id': [1, 2, 3, 4, 5],
@@ -57,11 +55,10 @@ def create_sample_files(path):
         })
         q1_data.to_sql('sales', conn, if_exists='replace', index=False)
         conn.close()
-        files_created.append('sales.db')
     
     # إنشاء ملف CSV
     if not os.path.exists(csv_file):
-        print("📝 إنشاء ملف CSV (الربع الثاني)...")
+        print("📝 إنشاء ملف CSV...")
         q2_data = pd.DataFrame({
             'id': [6, 7, 8, 9, 10],
             'product_name': ['لابتوب', 'سماعة', 'ماوس', 'كاميرا', 'شاحن'],
@@ -71,11 +68,10 @@ def create_sample_files(path):
             'region': ['الرياض', 'الدمام', 'جدة', 'الرياض', 'الخبر']
         })
         q2_data.to_csv(csv_file, index=False, encoding='utf-8-sig')
-        files_created.append('sales_q2.csv')
     
     # إنشاء ملف Excel
     if not os.path.exists(excel_file):
-        print("📝 إنشاء ملف Excel (الربع الثالث)...")
+        print("📝 إنشاء ملف Excel...")
         q3_data = pd.DataFrame({
             'id': [11, 12, 13, 14, 15],
             'product_name': ['لابتوب', 'سماعة', 'طابعة', 'ماوس', 'لوحة مفاتيح'],
@@ -85,89 +81,49 @@ def create_sample_files(path):
             'region': ['جدة', 'الرياض', 'الدمام', 'الخبر', 'الرياض']
         })
         q3_data.to_excel(excel_file, index=False)
-        files_created.append('sales_q3.xlsx')
     
-    if files_created:
-        print(f"\n✅ تم إنشاء الملفات: {', '.join(files_created)}")
-    
+    print("✅ تم إنشاء الملفات التجريبية")
     return db_file, csv_file, excel_file
 
 db_path, csv_path, excel_path = create_sample_files(folder_path)
 
 # ============================================
-# 3. تحميل البيانات من المصادر الثلاثة
+# 3. تحميل البيانات وتحليلها
 # ============================================
-print("\n" + "="*60)
-print("🔄 جاري تحميل البيانات من المصادر الثلاثة...")
-print("="*60)
+print("\n🔄 جاري تحميل وتحليل البيانات...")
 
-# تحميل من قاعدة البيانات
 conn = sqlite3.connect(db_path)
 df_q1 = pd.read_sql_query("SELECT *, 'Q1' as quarter FROM sales;", conn)
 conn.close()
-print(f"\n✅ قاعدة البيانات (الربع الأول): {len(df_q1)} صف")
 
-# تحميل من CSV
 df_q2 = pd.read_csv(csv_path, encoding='utf-8-sig')
 df_q2['quarter'] = 'Q2'
-print(f"✅ ملف CSV (الربع الثاني): {len(df_q2)} صف")
 
-# تحميل من Excel
 df_q3 = pd.read_excel(excel_path, engine='openpyxl')
 df_q3['quarter'] = 'Q3'
-print(f"✅ ملف Excel (الربع الثالث): {len(df_q3)} صف")
 
-# ============================================
-# 4. دمج وتحليل البيانات
-# ============================================
-print("\n" + "="*60)
-print("🔗 جاري دمج وتحليل البيانات...")
-print("="*60)
-
-# دمج جميع البيانات
 df_all = pd.concat([df_q1, df_q2, df_q3], ignore_index=True)
-
-# حساب الإيرادات
 df_all['total_revenue'] = df_all['quantity'] * df_all['price']
 df_all['sale_date'] = pd.to_datetime(df_all['sale_date'])
 
-# إحصائيات عامة
+# إحصائيات
 total_revenue = df_all['total_revenue'].sum()
 total_quantity = df_all['quantity'].sum()
 avg_price = df_all['price'].mean()
 total_transactions = len(df_all)
 
-print(f"\n📊 إجمالي الإيرادات: {total_revenue:,.2f} ريال")
-print(f"📦 إجمالي الكميات المباعة: {total_quantity:,} وحدة")
-print(f"💰 متوسط سعر المنتج: {avg_price:.2f} ريال")
-print(f"📋 عدد المعاملات: {total_transactions} عملية")
-
-# أفضل المنتجات
 top_products = df_all.groupby('product_name')['total_revenue'].sum().sort_values(ascending=False).head(5)
-
-print("\n🏆 أفضل 5 منتجات من حيث الإيرادات:")
-for i, (product, revenue) in enumerate(top_products.items(), 1):
-    print(f"   {i}. {product}: {revenue:,.2f} ريال")
-
-# الإيرادات حسب المنطقة
 revenue_by_region = df_all.groupby('region')['total_revenue'].sum().sort_values(ascending=False)
+quarterly = df_all.groupby('quarter')['total_revenue'].sum()
 
-print("\n💰 الإيرادات حسب المنطقة:")
-for region, revenue in revenue_by_region.items():
-    print(f"   • {region}: {revenue:,.2f} ريال")
+print(f"\n✅ إجمالي الإيرادات: {total_revenue:,.2f} ريال")
+print(f"✅ إجمالي الكميات: {total_quantity:,} وحدة")
 
 # ============================================
-# 5. إنشاء التقرير النصي
+# 4. إنشاء التقرير النصي
 # ============================================
-print("\n" + "="*60)
-print("📝 جاري إنشاء التقرير...")
-print("="*60)
 
 def create_report_text():
-    """إنشاء تقرير منسق للإرسال"""
-    
-    quarterly = df_all.groupby('quarter')['total_revenue'].sum()
-    
     report = f"""
 ╔══════════════════════════════════════════════════════════════════╗
 ║                      📊 تقرير تحليل المبيعات                      ║
@@ -181,7 +137,7 @@ def create_report_text():
 • متوسط سعر المنتج:          {avg_price:.2f} ريال
 • عدد المعاملات:             {total_transactions} عملية
 
-🏆 أفضل 5 منتجات مبيعاً:
+🏆 أفضل 5 منتجات:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     for i, (product, revenue) in enumerate(top_products.items(), 1):
@@ -201,197 +157,97 @@ def create_report_text():
     for quarter, revenue in quarterly.items():
         report += f"• الربع {quarter}          {revenue:>20,.2f} ريال\n"
     
-    report += """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✨ تم إنشاء هذا التقرير تلقائياً بواسطة نظام التحليل الذكي
-🤖 تم الإرسال من بوت Telegram
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
+    report += "\n✨ تم إنشاء هذا التقرير تلقائياً\n"
     return report
 
+report_text = create_report_text()
+print("\n" + report_text)
+
 # ============================================
-# 6. إنشاء ملف PDF
+# 5. إنشاء ملف PDF (باستخدام fpdf2)
 # ============================================
 
 class PDF(FPDF):
     def header(self):
-        # عنوان في رأس كل صفحة
         self.set_font('Arial', 'B', 15)
-        self.cell(0, 10, 'تقرير تحليل المبيعات', 0, 1, 'C')
+        self.cell(0, 10, 'Sales Report - تقرير المبيعات', 0, 1, 'C')
         self.ln(10)
     
     def footer(self):
-        # رقم الصفحة في تذييل كل صفحة
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, f'صفحة {self.page_no()}', 0, 0, 'C')
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-def create_pdf_report(report_text, output_path):
-    """تحويل التقرير النصي إلى ملف PDF"""
-    
+def create_pdf_report(text, output_path):
     pdf = PDF()
     pdf.add_page()
-    
-    # إعداد الخط
     pdf.set_font("Arial", size=10)
     
-    # تقسيم النص إلى سطور وإضافته
-    for line in report_text.split('\n'):
-        # ترميز النص العربي
+    for line in text.split('\n'):
+        # تنظيف النص من الرموز الخاصة
+        clean_line = line.encode('utf-8', 'ignore').decode('utf-8')
         try:
-            pdf.cell(0, 6, line.encode('latin-1', errors='ignore').decode('latin-1'), 0, 1)
+            pdf.cell(0, 6, clean_line, 0, 1)
         except:
-            pdf.cell(0, 6, line, 0, 1)
+            pdf.cell(0, 6, " ", 0, 1)
     
-    # حفظ ملف PDF
     pdf.output(output_path)
-    print(f"✅ تم إنشاء ملف PDF: {output_path}")
+    print(f"✅ تم إنشاء PDF: {output_path}")
     return output_path
 
-# إنشاء التقرير
-report_text = create_report_text()
-print("\n" + report_text)
-
-# إنشاء ملف PDF
 pdf_file = os.path.join(folder_path, 'sales_report.pdf')
 create_pdf_report(report_text, pdf_file)
 
-# حفظ التقرير النصي أيضاً
+# حفظ التقرير النصي
 txt_file = os.path.join(folder_path, 'analysis_report.txt')
 with open(txt_file, 'w', encoding='utf-8') as f:
     f.write(report_text)
-print(f"💾 تم حفظ التقرير النصي في: {txt_file}")
-
-# حفظ البيانات المدمجة
-merged_file = os.path.join(folder_path, 'merged_data.csv')
-df_all.to_csv(merged_file, index=False, encoding='utf-8-sig')
-print(f"💾 تم حفظ البيانات المدمجة في: {merged_file}")
 
 # ============================================
-# 7. إرسال إلى Telegram
+# 6. إرسال إلى Telegram
 # ============================================
 
 def send_telegram_message(bot_token, chat_id, message):
-    """إرسال رسالة نصية إلى Telegram"""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        'chat_id': chat_id,
-        'text': message,
-        'parse_mode': 'HTML'
-    }
+    payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}
     try:
         response = requests.post(url, json=payload)
-        if response.status_code == 200:
-            print("✅ تم إرسال الرسالة النصية إلى Telegram")
-            return True
-        else:
-            print(f"❌ فشل إرسال الرسالة: {response.text}")
-            return False
-    except Exception as e:
-        print(f"❌ خطأ: {e}")
+        return response.status_code == 200
+    except:
         return False
 
 def send_telegram_document(bot_token, chat_id, file_path, caption=""):
-    """إرسال ملف (PDF) إلى Telegram"""
     url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
-    
     with open(file_path, 'rb') as file:
         files = {'document': file}
         data = {'chat_id': chat_id, 'caption': caption}
-        
         try:
             response = requests.post(url, files=files, data=data)
-            if response.status_code == 200:
-                print(f"✅ تم إرسال ملف PDF إلى Telegram")
-                return True
-            else:
-                print(f"❌ فشل إرسال الملف: {response.text}")
-                return False
-        except Exception as e:
-            print(f"❌ خطأ: {e}")
+            return response.status_code == 200
+        except:
             return False
-
-def get_chat_id(bot_token):
-    """الحصول على معرف المحادثة (Chat ID) - طريقة مساعدة"""
-    url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            if data['ok'] and data['result']:
-                chat_id = data['result'][0]['message']['chat']['id']
-                print(f"\n💡 تم العثور على Chat ID: {chat_id}")
-                print("   يمكنك استخدام هذا المعرف في الكود")
-                return chat_id
-    except:
-        pass
-    return None
-
-# ============================================
-# 8. تنفيذ الإرسال إلى Telegram
-# ============================================
 
 print("\n" + "="*60)
 print("📤 جاري الإرسال إلى Telegram...")
 print("="*60)
 
-# التحقق من وجود التوكن
+# إدخال التوكن
 if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-    print("\n⚠️ لم تقم بإدخال توكن البوت!")
-    print("   يرجى إدخال التوكن الآن:")
     TELEGRAM_BOT_TOKEN = input("أدخل توكن البوت: ").strip()
-    
-    # محاولة الحصول على Chat ID تلقائياً
-    print("\n📡 جاري محاولة الحصول على Chat ID...")
-    print("   تأكد من إرسال رسالة إلى البوت أولاً")
-    chat_id = get_chat_id(TELEGRAM_BOT_TOKEN)
-    if chat_id:
-        TELEGRAM_CHAT_ID = chat_id
 
 if TELEGRAM_CHAT_ID == "YOUR_CHAT_ID_HERE":
     TELEGRAM_CHAT_ID = input("أدخل معرف المحادثة (Chat ID): ").strip()
 
-# إرسال رسالة نصية أولاً
-print("\n📨 جاري إرسال الرسالة النصية...")
-send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, report_text)
+# إرسال الرسالة
+if send_telegram_message(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, report_text):
+    print("✅ تم إرسال الرسالة النصية")
+else:
+    print("❌ فشل إرسال الرسالة")
 
 # إرسال ملف PDF
-print("\n📎 جاري إرسال ملف PDF...")
-send_telegram_document(
-    TELEGRAM_BOT_TOKEN, 
-    TELEGRAM_CHAT_ID, 
-    pdf_file, 
-    caption="📊 تقرير تحليل المبيعات - ملف PDF"
-)
+if send_telegram_document(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, pdf_file, "📊 تقرير المبيعات"):
+    print("✅ تم إرسال ملف PDF")
+else:
+    print("❌ فشل إرسال PDF")
 
-# إرسال ملف البيانات المدمجة (اختياري)
-send_extra = input("\nهل تريد إرسال ملف البيانات المدمجة (CSV) أيضاً؟ (نعم/لا): ").strip().lower()
-if send_extra in ['نعم', 'yes', 'y']:
-    send_telegram_document(
-        TELEGRAM_BOT_TOKEN, 
-        TELEGRAM_CHAT_ID, 
-        merged_file, 
-        caption="📋 البيانات المدمجة (CSV)"
-    )
-
-# ============================================
-# 9. عرض الملفات الناتجة
-# ============================================
-print("\n" + "="*60)
-print("📂 الملفات التي تم إنشاؤها:")
-print("="*60)
-
-files_list = []
-for file in os.listdir(folder_path):
-    if file.endswith(('.db', '.csv', '.xlsx', '.txt', '.pdf')):
-        file_path = os.path.join(folder_path, file)
-        size = os.path.getsize(file_path)
-        files_list.append(f"   📄 {file} ({size} bytes)")
-
-if files_list:
-    for f in files_list:
-        print(f)
-
-print("\n" + "="*60)
-print("🎉 اكتمل التحليل والإرسال إلى Telegram!")
-print("="*60)
+print("\n🎉 اكتمل!")
