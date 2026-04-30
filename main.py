@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""تحليل البيانات وإرسال النتائج كرسائل نصية إلى Email - WhatsApp - Telegram"""
+"""تحليل البيانات وإرسال النتائج - نسخة مع بياناتك"""
 
 import pandas as pd
 import sqlite3
@@ -11,8 +11,20 @@ import requests
 from datetime import datetime
 
 print("="*60)
-print("📊 مشروع تحليل البيانات وإرسال النتائج")
+print("📊 مشروع تحليل البيانات والإرسال")
 print("="*60)
+
+# ============================================
+# ⚠️ بياناتك (تم إدخالها)
+# ============================================
+
+# البريد الإلكتروني
+SENDER_EMAIL = "mouldi204@gmail.com"
+APP_PASSWORD = "elabed0022"  # ⚠️ يجب تغيير هذا إلى كلمة مرور تطبيق وليس كلمة المرور العادية
+RECEIVER_EMAIL = "mouldi204@gmail.com"  # إرسال إلى نفسك
+
+# واتساب
+WHATSAPP_NUMBER = "+21629311722"  # تونس
 
 # ============================================
 # 1. تحميل Google Drive
@@ -99,27 +111,20 @@ df_all['total_revenue'] = df_all['quantity'] * df_all['price']
 df_all['sale_date'] = pd.to_datetime(df_all['sale_date'])
 
 # ============================================
-# 5. إنشاء نص الرسالة (ملخص التحليل)
+# 5. إنشاء نص الرسالة
 # ============================================
 def create_message_text():
     """إنشاء نص الرسالة مع ملخص التحليل"""
     
-    # حساب الإحصائيات
     total_revenue = df_all['total_revenue'].sum()
     total_quantity = df_all['quantity'].sum()
     avg_price = df_all['price'].mean()
     total_transactions = len(df_all)
     
-    # أفضل المنتجات
     top_products = df_all.groupby('product_name')['total_revenue'].sum().sort_values(ascending=False).head(3)
-    
-    # الإيرادات حسب المنطقة
     revenue_by_region = df_all.groupby('region')['total_revenue'].sum().sort_values(ascending=False)
-    
-    # التحليل الربعي
     quarterly = df_all.groupby('quarter')['total_revenue'].sum()
     
-    # بناء الرسالة
     message = f"""
 ╔══════════════════════════════════════════════════════╗
 ║           📊 تقرير تحليل المبيعات               ║
@@ -127,145 +132,103 @@ def create_message_text():
 ╚══════════════════════════════════════════════════════╝
 
 📈 ملخص عام:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • إجمالي الإيرادات: {total_revenue:,.2f} ريال
 • إجمالي الكميات المباعة: {total_quantity:,} وحدة
 • متوسط سعر المنتج: {avg_price:.2f} ريال
 • عدد المعاملات: {total_transactions} عملية
 
-🏆 أفضل 3 منتجات من حيث الإيرادات:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏆 أفضل 3 منتجات:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     for i, (product, revenue) in enumerate(top_products.items(), 1):
         message += f"{i}. {product}: {revenue:,.2f} ريال\n"
     
-    message += "\n💰 الإيرادات حسب المنطقة:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += "\n💰 الإيرادات حسب المنطقة:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for region, revenue in revenue_by_region.items():
         message += f"• {region}: {revenue:,.2f} ريال\n"
     
-    message += "\n📅 الإيرادات حسب الربع:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += "\n📅 الإيرادات حسب الربع:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for quarter, revenue in quarterly.items():
         message += f"• الربع {quarter}: {revenue:,.2f} ريال\n"
     
     message += """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✨ تم إنشاء هذا التقرير تلقائياً بواسطة نظام التحليل الذكي
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ تم إنشاء هذا التقرير تلقائياً
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     return message
 
 # إنشاء نص الرسالة
 message_text = create_message_text()
 
-# عرض الرسالة قبل الإرسال
+# عرض الرسالة
 print("\n" + "="*60)
 print("📝 نص الرسالة التي سيتم إرسالها:")
 print("="*60)
 print(message_text)
 
 # ============================================
-# 6. دوال الإرسال
+# 6. دوال الإرسال (مع بياناتك مباشرة)
 # ============================================
 
-# 6.1 إرسال إلى البريد الإلكتروني
-def send_email_message(receiver_email, subject, message):
-    """إرسال رسالة نصية إلى البريد الإلكتروني"""
+def send_email_message():
+    """إرسال رسالة إلى البريد الإلكتروني"""
     try:
-        # ⚠️ أدخل بيانات حسابك هنا
-        sender_email = "your_email@gmail.com"  # غيّر إلى بريدك
-        app_password = "your_app_password"      # غيّر إلى كلمة مرور التطبيق
+        print("\n📧 جاري إرسال البريد الإلكتروني...")
+        print(f"   من: {SENDER_EMAIL}")
+        print(f"   إلى: {RECEIVER_EMAIL}")
         
-        yag = yagmail.SMTP(user=sender_email, password=app_password)
-        yag.send(to=receiver_email, subject=subject, contents=message)
+        yag = yagmail.SMTP(user=SENDER_EMAIL, password=APP_PASSWORD)
+        yag.send(to=RECEIVER_EMAIL, subject="📊 تقرير تحليل المبيعات", contents=message_text)
         print("✅ تم إرسال الرسالة إلى البريد الإلكتروني")
         return True
     except Exception as e:
         print(f"❌ فشل إرسال البريد: {e}")
+        print("   📌 ملاحظة: Gmail يطلب 'كلمة مرور تطبيق' وليس كلمة المرور العادية")
         return False
 
-# 6.2 إرسال إلى واتساب (رسالة نصية)
-def send_whatsapp_message(phone_number, message):
-    """إرسال رسالة نصية إلى واتساب"""
+def send_whatsapp_message():
+    """إرسال رسالة إلى واتساب"""
     try:
-        # phone_number: يجب أن يكون مع رمز الدولة، مثال: "+9665XXXXXXXX"
-        # wait_time: وقت الانتظار بالثواني قبل الإرسال
-        kit.sendwhatmsg_instantly(phone_no=phone_number, message=message, wait_time=20, tab_close=True)
-        print("✅ تم إرسال الرسالة إلى واتساب")
-        print("   📌 ملاحظة: تأكد من تسجيل الدخول إلى WhatsApp Web")
+        print("\n💬 جاري إرسال رسالة واتساب...")
+        print(f"   إلى: {WHATSAPP_NUMBER}")
+        print("   ⏳ سيتم فتح WhatsApp Web خلال 20 ثانية...")
+        
+        kit.sendwhatmsg_instantly(phone_no=WHATSAPP_NUMBER, message=message_text, wait_time=20, tab_close=False)
+        print("✅ تم فتح WhatsApp Web - اضغط إرسال لإتمام الإرسال")
         return True
     except Exception as e:
         print(f"❌ فشل إرسال واتساب: {e}")
-        return False
-
-# 6.3 إرسال إلى تليجرام
-def send_telegram_message(bot_token, chat_id, message):
-    """إرسال رسالة نصية إلى تليجرام"""
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': message,
-            'parse_mode': 'HTML'
-        }
-        response = requests.post(url, json=payload)
-        
-        if response.status_code == 200:
-            print("✅ تم إرسال الرسالة إلى تليجرام")
-            return True
-        else:
-            print(f"❌ فشل إرسال تليجرام: {response.text}")
-            return False
-    except Exception as e:
-        print(f"❌ خطأ في تليجرام: {e}")
+        print("   📌 ملاحظة: تأكد من:")
+        print("      1. تسجيل الدخول إلى WhatsApp Web")
+        print("      2. وجود اتصال إنترنت")
         return False
 
 # ============================================
-# 7. إدخال بيانات الإرسال
+# 7. تنفيذ الإرسال التلقائي
 # ============================================
 
 print("\n" + "="*60)
-print("📤 إعدادات الإرسال:")
+print("📤 جاري إرسال التقارير...")
 print("="*60)
 
-# تخزين نتائج الإرسال
-send_results = {}
+# إرسال إلى البريد الإلكتروني تلقائياً
+email_result = send_email_message()
 
-# 7.1 البريد الإلكتروني
-send_email_choice = input("\nهل تريد إرسال الرسالة إلى البريد الإلكتروني؟ (نعم/لا): ").strip().lower()
-if send_email_choice in ['نعم', 'yes', 'y']:
-    receiver_email = input("أدخل البريد الإلكتروني المستلم: ").strip()
-    subject = "📊 تقرير تحليل المبيعات"
-    send_results['Email'] = send_email_message(receiver_email, subject, message_text)
-
-# 7.2 واتساب
-send_whatsapp_choice = input("\nهل تريد إرسال الرسالة إلى واتساب؟ (نعم/لا): ").strip().lower()
-if send_whatsapp_choice in ['نعم', 'yes', 'y']:
-    phone = input("أدخل رقم الهاتف مع رمز الدولة (مثال: +966512345678): ").strip()
-    send_results['WhatsApp'] = send_whatsapp_message(phone, message_text)
-
-# 7.3 تليجرام
-send_telegram_choice = input("\nهل تريد إرسال الرسالة إلى تليجرام؟ (نعم/لا): ").strip().lower()
-if send_telegram_choice in ['نعم', 'yes', 'y']:
-    print("\n📌 للحصول على توكن البوت ومعرف المحادثة:")
-    print("   1. ابحث عن @BotFather في تليجرام وأنشئ بوت جديد")
-    print("   2. ابحث عن @userinfobot لتحصل على معرف المحادثة الخاص بك")
-    
-    bot_token = input("أدخل توكن البوت (Bot Token): ").strip()
-    chat_id = input("أدخل معرف المحادثة (Chat ID): ").strip()
-    send_results['Telegram'] = send_telegram_message(bot_token, chat_id, message_text)
+# إرسال إلى واتساب تلقائياً
+whatsapp_result = send_whatsapp_message()
 
 # ============================================
-# 8. تقرير النتائج النهائي
+# 8. تقرير النتائج
 # ============================================
 print("\n" + "="*60)
 print("📋 تقرير نتائج الإرسال:")
 print("="*60)
+print(f"✅ البريد الإلكتروني: {'تم الإرسال' if email_result else 'فشل الإرسال'}")
+print(f"✅ واتساب: {'تم الإرسال' if whatsapp_result else 'فشل الإرسال'}")
 
-for platform, status in send_results.items():
-    icon = "✅" if status else "❌"
-    print(f"{icon} {platform}: {'تم الإرسال بنجاح' if status else 'فشل الإرسال'}")
-
-# حفظ الرسالة في ملف (نسخة احتياطية)
+# حفظ نسخة محلية
 with open('analysis_report.txt', 'w', encoding='utf-8') as f:
     f.write(message_text)
 print("\n💾 تم حفظ نسخة من التقرير في: analysis_report.txt")
