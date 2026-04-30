@@ -1,13 +1,23 @@
-FROM python:3.11-slim
+# Dockerfile صحيح
+FROM python:3.9-slim
 
+# تثبيت dependencies النظام
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# تعيين مجلد العمل
 WORKDIR /app
 
-# Copier et installer les dépendances
+# نسخ requirements.txt أولاً (للاستفادة من cache)
 COPY requirements.txt .
+
+# تثبيت المكتبات
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copier le script Python
-COPY main.py .
+# نسخ باقي الملفات
+COPY . .
 
-# Lancer le bot
+# تشغيل التطبيق
 CMD ["python", "main.py"]
