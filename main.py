@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""تحليل البيانات وإرسال النتائج - نسخة مع بياناتك"""
+"""تحليل البيانات وإرسال النتائج"""
 
 import pandas as pd
 import sqlite3
@@ -15,16 +15,13 @@ print("📊 مشروع تحليل البيانات والإرسال")
 print("="*60)
 
 # ============================================
-# ⚠️ بياناتك (تم إدخالها)
+# بياناتك
 # ============================================
 
-# البريد الإلكتروني
 SENDER_EMAIL = "mouldi204@gmail.com"
-APP_PASSWORD = "elabed0022"  # ⚠️ يجب تغيير هذا إلى كلمة مرور تطبيق وليس كلمة المرور العادية
-RECEIVER_EMAIL = "mouldi204@gmail.com"  # إرسال إلى نفسك
-
-# واتساب
-WHATSAPP_NUMBER = "+21629311722"  # تونس
+APP_PASSWORD = "elabed0022"
+RECEIVER_EMAIL = "mouldi204@gmail.com"
+WHATSAPP_NUMBER = "+21629311722"
 
 # ============================================
 # 1. تحميل Google Drive
@@ -37,10 +34,10 @@ print("✅ تم تحميل Google Drive بنجاح!")
 # 2. تحديد مسار المجلد
 # ============================================
 folder_path = '/content/drive/MyDrive/sales_data/'
-!mkdir -p "{folder_path}"
+os.makedirs(folder_path, exist_ok=True)
 
 # ============================================
-# 3. إنشاء أو تحميل البيانات
+# 3. إنشاء البيانات
 # ============================================
 def load_or_create_data(path):
     """تحميل البيانات من Drive أو إنشاؤها"""
@@ -94,7 +91,6 @@ db_path, csv_path, excel_path = load_or_create_data(folder_path)
 # ============================================
 print("\n🔄 جاري تحميل وتحليل البيانات...")
 
-# تحميل البيانات
 conn = sqlite3.connect(db_path)
 df_q1 = pd.read_sql_query("SELECT *, 'Q1' as quarter FROM sales;", conn)
 conn.close()
@@ -105,7 +101,6 @@ df_q2['quarter'] = 'Q2'
 df_q3 = pd.read_excel(excel_path, engine='openpyxl')
 df_q3['quarter'] = 'Q3'
 
-# دمج البيانات
 df_all = pd.concat([df_q1, df_q2, df_q3], ignore_index=True)
 df_all['total_revenue'] = df_all['quantity'] * df_all['price']
 df_all['sale_date'] = pd.to_datetime(df_all['sale_date'])
@@ -127,7 +122,7 @@ def create_message_text():
     
     message = f"""
 ╔══════════════════════════════════════════════════════╗
-║           📊 تقرير تحليل المبيعات               ║
+║           📊 تقرير تحليل المبيعات                    ║
 ║              {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}              ║
 ╚══════════════════════════════════════════════════════╝
 
@@ -159,80 +154,42 @@ def create_message_text():
 """
     return message
 
-# إنشاء نص الرسالة
 message_text = create_message_text()
 
-# عرض الرسالة
 print("\n" + "="*60)
-print("📝 نص الرسالة التي سيتم إرسالها:")
+print("📝 نص التقرير:")
 print("="*60)
 print(message_text)
 
 # ============================================
-# 6. دوال الإرسال (مع بياناتك مباشرة)
+# 6. إرسال التقارير
 # ============================================
-
-def send_email_message():
-    """إرسال رسالة إلى البريد الإلكتروني"""
-    try:
-        print("\n📧 جاري إرسال البريد الإلكتروني...")
-        print(f"   من: {SENDER_EMAIL}")
-        print(f"   إلى: {RECEIVER_EMAIL}")
-        
-        yag = yagmail.SMTP(user=SENDER_EMAIL, password=APP_PASSWORD)
-        yag.send(to=RECEIVER_EMAIL, subject="📊 تقرير تحليل المبيعات", contents=message_text)
-        print("✅ تم إرسال الرسالة إلى البريد الإلكتروني")
-        return True
-    except Exception as e:
-        print(f"❌ فشل إرسال البريد: {e}")
-        print("   📌 ملاحظة: Gmail يطلب 'كلمة مرور تطبيق' وليس كلمة المرور العادية")
-        return False
-
-def send_whatsapp_message():
-    """إرسال رسالة إلى واتساب"""
-    try:
-        print("\n💬 جاري إرسال رسالة واتساب...")
-        print(f"   إلى: {WHATSAPP_NUMBER}")
-        print("   ⏳ سيتم فتح WhatsApp Web خلال 20 ثانية...")
-        
-        kit.sendwhatmsg_instantly(phone_no=WHATSAPP_NUMBER, message=message_text, wait_time=20, tab_close=False)
-        print("✅ تم فتح WhatsApp Web - اضغط إرسال لإتمام الإرسال")
-        return True
-    except Exception as e:
-        print(f"❌ فشل إرسال واتساب: {e}")
-        print("   📌 ملاحظة: تأكد من:")
-        print("      1. تسجيل الدخول إلى WhatsApp Web")
-        print("      2. وجود اتصال إنترنت")
-        return False
-
-# ============================================
-# 7. تنفيذ الإرسال التلقائي
-# ============================================
-
 print("\n" + "="*60)
 print("📤 جاري إرسال التقارير...")
 print("="*60)
 
-# إرسال إلى البريد الإلكتروني تلقائياً
-email_result = send_email_message()
+# إرسال إلى البريد
+try:
+    print("\n📧 جاري إرسال البريد...")
+    yag = yagmail.SMTP(user=SENDER_EMAIL, password=APP_PASSWORD)
+    yag.send(to=RECEIVER_EMAIL, subject="تقرير المبيعات", contents=message_text)
+    print("✅ تم إرسال البريد")
+except Exception as e:
+    print(f"❌ خطأ في البريد: {e}")
 
-# إرسال إلى واتساب تلقائياً
-whatsapp_result = send_whatsapp_message()
+# إرسال إلى واتساب
+try:
+    print("\n💬 جاري إرسال واتساب...")
+    kit.sendwhatmsg_instantly(phone_no=WHATSAPP_NUMBER, message=message_text, wait_time=20)
+    print("✅ تم فتح واتساب ويب")
+except Exception as e:
+    print(f"❌ خطأ في واتساب: {e}")
 
-# ============================================
-# 8. تقرير النتائج
-# ============================================
-print("\n" + "="*60)
-print("📋 تقرير نتائج الإرسال:")
-print("="*60)
-print(f"✅ البريد الإلكتروني: {'تم الإرسال' if email_result else 'فشل الإرسال'}")
-print(f"✅ واتساب: {'تم الإرسال' if whatsapp_result else 'فشل الإرسال'}")
-
-# حفظ نسخة محلية
+# حفظ نسخة
 with open('analysis_report.txt', 'w', encoding='utf-8') as f:
     f.write(message_text)
-print("\n💾 تم حفظ نسخة من التقرير في: analysis_report.txt")
+print("\n💾 تم حفظ التقرير في: analysis_report.txt")
 
 print("\n" + "="*60)
-print("🎉 اكتمل التحليل والإرسال!")
+print("🎉 اكتمل التحليل!")
 print("="*60)
