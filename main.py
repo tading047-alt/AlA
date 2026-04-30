@@ -6,7 +6,7 @@ import sqlite3
 import os
 import requests
 from datetime import datetime
-from fpdf import FPDF  # fpdf2 تستخدم نفس الاسم FPDF
+from fpdf2 import FPDF  # fpdf2 تستخدم نفس الاسم FPDF
 import json
 
 print("="*60)
