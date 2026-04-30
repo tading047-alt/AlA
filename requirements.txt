@@ -3,7 +3,3 @@ openpyxl
 yagmail
 pywhatkit
 requests
-plotly
-numpy
-python-dateutil
-pytz
