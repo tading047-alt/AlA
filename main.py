@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
-"""تحليل البيانات وإرسال النتائج"""
+"""نسخة Docker / Local - بدون Google Drive"""
 
 import pandas as pd
 import sqlite3
 import os
-from google.colab import drive
 import yagmail
 import pywhatkit as kit
 import requests
 from datetime import datetime
 
 print("="*60)
-print("📊 مشروع تحليل البيانات والإرسال")
+print("📊 تشغيل على Docker / Local")
 print("="*60)
 
 # ============================================
@@ -19,34 +18,30 @@ print("="*60)
 # ============================================
 
 SENDER_EMAIL = "mouldi204@gmail.com"
-APP_PASSWORD = "elabed0022"
+APP_PASSWORD = "elabed0022"  # يجب تغييرها إلى كلمة مرور تطبيق
 RECEIVER_EMAIL = "mouldi204@gmail.com"
 WHATSAPP_NUMBER = "+21629311722"
 
 # ============================================
-# 1. تحميل Google Drive
+# 1. تحديد مسار الملفات (محلي)
 # ============================================
-print("\n📁 جاري تحميل Google Drive...")
-drive.mount('/content/drive')
-print("✅ تم تحميل Google Drive بنجاح!")
+
+# استخدم المجلد الحالي بدلاً من Drive
+folder_path = os.path.dirname(os.path.abspath(__file__))
+print(f"📁 مجلد العمل: {folder_path}")
 
 # ============================================
-# 2. تحديد مسار المجلد
+# 2. إنشاء البيانات (بدون Drive)
 # ============================================
-folder_path = '/content/drive/MyDrive/sales_data/'
-os.makedirs(folder_path, exist_ok=True)
 
-# ============================================
-# 3. إنشاء البيانات
-# ============================================
-def load_or_create_data(path):
-    """تحميل البيانات من Drive أو إنشاؤها"""
+def create_data_locally():
+    """إنشاء الملفات محلياً"""
     
-    db_file = os.path.join(path, 'sales.db')
-    csv_file = os.path.join(path, 'sales_q2.csv')
-    excel_file = os.path.join(path, 'sales_q3.xlsx')
+    db_file = os.path.join(folder_path, 'sales.db')
+    csv_file = os.path.join(folder_path, 'sales_q2.csv')
+    excel_file = os.path.join(folder_path, 'sales_q3.xlsx')
     
-    # إنشاء الملفات إذا لم تكن موجودة
+    # إنشاء قاعدة البيانات
     if not os.path.exists(db_file):
         print("📝 إنشاء ملفات تجريبية...")
         conn = sqlite3.connect(db_file)
@@ -61,6 +56,7 @@ def load_or_create_data(path):
         q1_data.to_sql('sales', conn, if_exists='replace', index=False)
         conn.close()
         
+        # إنشاء CSV
         q2_data = pd.DataFrame({
             'id': [6, 7, 8, 9, 10],
             'product_name': ['لابتوب', 'سماعة', 'ماوس', 'كاميرا', 'شاحن'],
@@ -71,6 +67,7 @@ def load_or_create_data(path):
         })
         q2_data.to_csv(csv_file, index=False)
         
+        # إنشاء Excel
         q3_data = pd.DataFrame({
             'id': [11, 12, 13, 14, 15],
             'product_name': ['لابتوب', 'سماعة', 'طابعة', 'ماوس', 'لوحة مفاتيح'],
@@ -84,10 +81,10 @@ def load_or_create_data(path):
     
     return db_file, csv_file, excel_file
 
-db_path, csv_path, excel_path = load_or_create_data(folder_path)
+db_path, csv_path, excel_path = create_data_locally()
 
 # ============================================
-# 4. تحميل البيانات وتحليلها
+# 3. تحميل البيانات وتحليلها
 # ============================================
 print("\n🔄 جاري تحميل وتحليل البيانات...")
 
@@ -106,7 +103,7 @@ df_all['total_revenue'] = df_all['quantity'] * df_all['price']
 df_all['sale_date'] = pd.to_datetime(df_all['sale_date'])
 
 # ============================================
-# 5. إنشاء نص الرسالة
+# 4. إنشاء نص الرسالة
 # ============================================
 def create_message_text():
     """إنشاء نص الرسالة مع ملخص التحليل"""
@@ -162,7 +159,7 @@ print("="*60)
 print(message_text)
 
 # ============================================
-# 6. إرسال التقارير
+# 5. إرسال التقارير
 # ============================================
 print("\n" + "="*60)
 print("📤 جاري إرسال التقارير...")
@@ -171,24 +168,37 @@ print("="*60)
 # إرسال إلى البريد
 try:
     print("\n📧 جاري إرسال البريد...")
+    print(f"   من: {SENDER_EMAIL}")
+    print(f"   إلى: {RECEIVER_EMAIL}")
+    
     yag = yagmail.SMTP(user=SENDER_EMAIL, password=APP_PASSWORD)
-    yag.send(to=RECEIVER_EMAIL, subject="تقرير المبيعات", contents=message_text)
+    yag.send(to=RECEIVER_EMAIL, subject="📊 تقرير تحليل المبيعات", contents=message_text)
     print("✅ تم إرسال البريد")
+    
 except Exception as e:
     print(f"❌ خطأ في البريد: {e}")
+    print("\n💡 نصيحة: Gmail يتطلب 'كلمة مرور تطبيق' وليس كلمة المرور العادية")
 
 # إرسال إلى واتساب
 try:
     print("\n💬 جاري إرسال واتساب...")
-    kit.sendwhatmsg_instantly(phone_no=WHATSAPP_NUMBER, message=message_text, wait_time=20)
-    print("✅ تم فتح واتساب ويب")
+    print(f"   إلى: {WHATSAPP_NUMBER}")
+    print("   ⏳ سيتم فتح WhatsApp Web خلال 20 ثانية...")
+    
+    kit.sendwhatmsg_instantly(phone_no=WHATSAPP_NUMBER, message=message_text, wait_time=20, tab_close=False)
+    print("✅ تم فتح WhatsApp Web")
+    
 except Exception as e:
     print(f"❌ خطأ في واتساب: {e}")
+    print("\n💡 نصيحة: تأكد من:")
+    print("   1. تسجيل الدخول إلى WhatsApp Web")
+    print("   2. رقم الهاتف صحيح مع رمز الدولة (+216...)")
 
 # حفظ نسخة
-with open('analysis_report.txt', 'w', encoding='utf-8') as f:
+report_file = os.path.join(folder_path, 'analysis_report.txt')
+with open(report_file, 'w', encoding='utf-8') as f:
     f.write(message_text)
-print("\n💾 تم حفظ التقرير في: analysis_report.txt")
+print(f"\n💾 تم حفظ التقرير في: {report_file}")
 
 print("\n" + "="*60)
 print("🎉 اكتمل التحليل!")
