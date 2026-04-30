@@ -17,8 +17,8 @@ print("="*60)
 # بيانات Telegram (أدخل بياناتك هنا)
 # ============================================
 
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ضع توكن البوت هنا
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"      # ضع معرف المحادثة هنا
+TELEGRAM_BOT_TOKEN = "8716390236:AAEjPGJSYXN5FrqsuI845KhQoVzMfM_Suoo"  # ضع توكن البوت هنا
+TELEGRAM_CHAT_ID = "5067771509"      # ضع معرف المحادثة هنا
 
 # ============================================
 # 1. تحديد مسار المجلد
